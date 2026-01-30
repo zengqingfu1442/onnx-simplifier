@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script src="./onnxsim.js"></script>
+        <script type="text/javascript">
+            // based on https://github.com/StanleyMasinde/wasm-image-processor
+            create_onnxsim({
+                preRun: [(runtime) => {
+                    console.log("preinit", runtime);
+                    runtime.ENV.LOG_THRESHOLD = "-1";
+                }],
+                print: (str) => {
+                    console.log("stdout:", str);
+                    document.getElementById("log-output").textContent += str + "\n";
+                },
+                printErr: (str) => {
+                    console.error("stderr:", str);
+                    document.getElementById("log-output").textContent += str + "\n";
+                },
+            }).then((runtime) => {
+                console.log(runtime);
+
+                const input = document.getElementById("file-input");
+                const dl_btn = document.getElementById("download-button");
+
+                input.addEventListener("change", async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const result_name = (file.name.endsWith(".onnx") ? file.name.substring(0, file.name.length - 5) : file.name) + ".simplified.onnx"
+
+                    try {
+                        input.disabled = true;
+                        const buf = await file.arrayBuffer();
+                        const simplify_result = runtime.onnxsimplify_export(
+                            buf,
+                            [], // skip optimizers
+                            true, // constant folding
+                            true, // shape inference
+                            1024 * 1024 * 1024 * 1, // tensor size threshold
+                        );
+                        if (!simplify_result) {
+                            console.error("simplify failed!");
+                            return;
+                        }
+                        console.log("to blob start");
+                        const blob = new Blob(simplify_result, { type: "application/octet-stream" });
+                        console.log("to blob done")
+                        const reader = new FileReader();
+                        reader.addEventListener("load", () => {
+                            console.log("to data url end")
+                            input.disabled = false;
+                            dl_btn.disabled = false;
+                            dl_btn.onclick = () => {
+                                const a = document.createElement("a");
+                                a.href = reader.result;
+                                a.download = result_name;
+                                a.click();
+                                URL.revokeObjectURL(reader.result);
+                            };
+                        });
+                        console.log("to data url start")
+                        reader.readAsDataURL(blob);
+                    } catch (error) {
+                        console.error("error: ", error);
+                    }
+                });
+            });
+        </script>
+    </head>
+    <body>
+        <h1>Model converter</h1>
+        <input type="file" id="file-input" />
+        <button id="download-button" disabled>Download</button>
+        <h2>Output logs:</h2>
+        <pre id="log-output">
+        </pre>
+    </body>
+</html>

@@ -1,0 +1,1 @@
+../../build-wasm-node-OFF/onnxsim.js
