@@ -21,10 +21,10 @@ create_onnxsim({
             case "simplify":
                 result = runtime.onnxsimplify_export(
                     buf,
-                    [], // skip optimizers
-                    true, // constant folding
-                    true, // shape inference
-                    1024 * 1024 * 1024 * 1, // tensor size threshold
+                    e.data[2], // skip optimizers
+                    e.data[3], // constant folding
+                    e.data[4], // shape inference
+                    e.data[5], // tensor size threshold
                 );
                 break;
             case "optimize":

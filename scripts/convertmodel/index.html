@@ -8,19 +8,23 @@
                     return new Array(vec.size()).fill(0).map((_, id) => vec.get(id))
                 };
                 const passes = document.getElementById("passes");
+                const checkboxes = {};
                 for (const p of to_ary(runtime.onnxoptimizer_passes()).sort()) {
                     const c = document.createElement("input");
                     c.type = "checkbox";
                     c.setAttribute("class", "pass");
                     c.name = p;
-                    c.checked = true;
                     c.id = "id_" + p;
+                    checkboxes[p] = c;
                     passes.appendChild(c);
                     const l = document.createElement("label");
                     l.textContent = p;
                     l.setAttribute("for", c.id);
                     passes.appendChild(l);
                     passes.appendChild(document.createElement("br"));
+                }
+                for (const p of to_ary(runtime.onnxoptimizer_fuse_elimination_passes()).sort()) {
+                    checkboxes[p].checked = true;
                 }
             });
 
@@ -62,8 +66,16 @@
                     dl_btn.disabled = true;
                     const buf = await file.arrayBuffer();
                     console.log("sending: ", file.name);
-                    const passes = Array.from(document.querySelectorAll('input[class="pass"]:checked')).map((v) => v.name);
-                    worker.postMessage([optimizer, buf, passes], [buf]);
+                    let passes = null;
+                    if (optimizer == "simplify") {
+                        passes = Array.from(document.querySelectorAll('input[class="pass"]:not(:checked)')).map((v) => v.name);
+                    } else {
+                        passes = Array.from(document.querySelectorAll('input[class="pass"]:checked')).map((v) => v.name);
+                    }
+                    const constant_fold = document.getElementById("id_simplify_constant_fold").checked;
+                    const shape_inference = document.getElementById("id_simplify_shape_inference").checked;
+                    const tensor_size_threshold = parseInt(document.getElementById("id_simplify_tensor_size_threshold").value);
+                    worker.postMessage([optimizer, buf, passes, constant_fold, shape_inference, tensor_size_threshold], [buf]);
                 });
             };
         </script>
@@ -86,7 +98,17 @@
                 Fixed <a href="https://github.com/onnx/optimizer" target="_blank">Optimize</a>
             </label>
         </div>
-        <div id="passes"></div>
+        <div id="passes">
+            <input type="checkbox" name="simplify_constant_fold" id="id_simplify_constant_fold" checked>
+            <label for="id_simplify_constant_fold">constant fold (simplify only)</label>
+            <br/>
+            <input type="checkbox" name="simplify_shape_inference" id="id_simplify_shape_inference" checked>
+            <label for="id_simplify_shape_inference">shape inference (simplify only)</label>
+            <br/>
+            <label>tensor size threshold (simplify only)</label>
+            <input type="number" name="simplify_tensor_size_threshold" id="id_simplify_tensor_size_threshold" value="1000000000">
+            <br/>
+        </div>
         <h2>Console outputs:</h2>
         <pre id="log-output"></pre>
     </body>
