@@ -1,4 +1,3 @@
-from distutils.spawn import find_executable
 from distutils import sysconfig, log
 import setuptools
 import setuptools.command.build_py
@@ -11,6 +10,7 @@ import glob
 import os
 import shlex
 import subprocess
+import shutil
 import sys
 import platform
 from textwrap import dedent
@@ -25,7 +25,7 @@ CMAKE_BUILD_DIR = os.path.join(TOP_DIR, '.setuptools-cmake-build')
 WINDOWS = (os.name == 'nt')
 MACOS = sys.platform.startswith("darwin")
 
-CMAKE = find_executable('cmake')
+CMAKE = shutil.which('cmake')
 
 install_requires = []
 setup_requires = []
@@ -144,8 +144,6 @@ class cmake_build(setuptools.Command):
                 '-DONNX_USE_LITE_PROTO=OFF',
                 '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
                 '-DONNX_NAMESPACE={}'.format(ONNX_NAMESPACE),
-                '-DPY_EXT_SUFFIX={}'.format(
-                    sysconfig.get_config_var('EXT_SUFFIX') or ''),
                 '-DONNX_OPT_USE_SYSTEM_PROTOBUF={}'.format(
                     'ON' if ONNX_OPT_USE_SYSTEM_PROTOBUF else 'OFF'),
             ]
@@ -283,7 +281,7 @@ setuptools.setup(
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     packages=packages,
-    license='Apache License v2.0',
+    license='MIT AND (Apache-2.0 OR BSD-2-Clause)',
     include_package_data=True,
     install_requires=install_requires,
     setup_requires=setup_requires,
@@ -296,7 +294,6 @@ setuptools.setup(
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
-        'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python :: 3 :: Only',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',

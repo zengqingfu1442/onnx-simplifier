@@ -338,8 +338,9 @@ size_t size_of_dtype(onnx::TensorProto::DataType dtype) {
     // Don't know the size of string.. Just return 16.
     case onnx::TensorProto::DataType::TensorProto_DataType_STRING:
       return 16;
+    default:
     case onnx::TensorProto::DataType::TensorProto_DataType_UNDEFINED:
-      throw std::invalid_argument("Undefined datatype");
+      throw std::invalid_argument("Undefined or unknown datatype");
   }
   throw std::invalid_argument("Unknown datatype " + std::to_string(dtype));
 }

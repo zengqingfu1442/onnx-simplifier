@@ -1,4 +1,4 @@
-recursive-include onnxsim *.h *.hpp *.c *.cc *.cpp *.proto
+recursive-include onnxsim *.h *.hpp *.cc *.cpp
 recursive-include cmake *
 recursive-include third_party *
 recursive-exclude third_party/onnx-optimizer/build *
