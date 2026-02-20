@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script type="text/javascript" src="./onnxsim.js"></script>
+        <script type="text/javascript">
+            create_onnxsim().then((runtime) => {
+                to_ary = (vec) => {
+                    return new Array(vec.size()).fill(0).map((_, id) => vec.get(id))
+                };
+                const passes = document.getElementById("passes");
+                const checkboxes = {};
+                for (const p of to_ary(runtime.onnxoptimizer_passes()).sort()) {
+                    const c = document.createElement("input");
+                    c.type = "checkbox";
+                    c.setAttribute("class", "pass");
+                    c.name = p;
+                    c.id = "id_" + p;
+                    checkboxes[p] = c;
+                    passes.appendChild(c);
+                    const l = document.createElement("label");
+                    l.textContent = p;
+                    l.setAttribute("for", c.id);
+                    passes.appendChild(l);
+                    passes.appendChild(document.createElement("br"));
+                }
+                for (const p of to_ary(runtime.onnxoptimizer_fuse_elimination_passes()).sort()) {
+                    checkboxes[p].checked = true;
+                }
+            });
+
+            window.onload = () => {
+                const worker = new Worker("worker.js");
+                const log_output = document.getElementById("log-output");
+                const input = document.getElementById("file-input");
+                const dl_btn = document.getElementById("download-button");
+                let result_name = "";
+                worker.onmessage = (e) => {
+                    switch (e.data[0]) {
+                        case "stdout":
+                            log_output.textContent += e.data[1] + "\n";
+                            break;
+                        case "stderr":
+                            log_output.textContent += e.data[1] + "\n";
+                            break;
+                        case "convert-done":
+                            input.disabled = false;
+                            dl_btn.disabled = false;
+                            const data_url = e.data[1];
+                            dl_btn.onclick = () => {
+                                const a = document.createElement("a");
+                                a.href = data_url;
+                                a.download = result_name;
+                                a.click();
+                            };
+                            break;
+                    }
+                };
+
+                input.addEventListener("change", async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const optimizer = document.querySelector('input[name="optimizer"]:checked').value;
+                    result_name = (file.name.endsWith(".onnx") ? file.name.substring(0, file.name.length - 5) : file.name) + "." + optimizer + ".onnx"
+
+                    input.disabled = true;
+                    dl_btn.disabled = true;
+                    const buf = await file.arrayBuffer();
+                    console.log("sending: ", file.name);
+                    let passes = null;
+                    if (optimizer == "simplify") {
+                        passes = Array.from(document.querySelectorAll('input[class="pass"]:not(:checked)')).map((v) => v.name);
+                    } else {
+                        passes = Array.from(document.querySelectorAll('input[class="pass"]:checked')).map((v) => v.name);
+                    }
+                    const constant_fold = document.getElementById("id_simplify_constant_fold").checked;
+                    const shape_inference = document.getElementById("id_simplify_shape_inference").checked;
+                    const tensor_size_threshold = parseInt(document.getElementById("id_simplify_tensor_size_threshold").value);
+                    worker.postMessage([optimizer, buf, passes, constant_fold, shape_inference, tensor_size_threshold], [buf]);
+                });
+            };
+        </script>
+    </head>
+    <body>
+        <h1>Model converter</h1>
+        <input type="file" id="file-input" />
+        <button id="download-button" disabled>Download</button>
+        <div>
+            <input type="radio" name="optimizer" value="simplify" id="optimizer_simplify" checked>
+            <label for="optimizer_simplify">
+                <a href="https://github.com/daquexian/onnx-simplifier" target="_blank">Simplify</a>
+            </label>
+            <input type="radio" name="optimizer" value="optimize" id="optimizer_optimize">
+            <label for="optimizer_optimize">
+                <a href="https://github.com/onnx/optimizer" target="_blank">Optimize</a>
+            </label>
+            <input type="radio" name="optimizer" value="optimize_fixed" id="optimizer_optimize_fixed">
+            <label for="optimizer_optimize_fixed">
+                Fixed <a href="https://github.com/onnx/optimizer" target="_blank">Optimize</a>
+            </label>
+        </div>
+        <div id="passes">
+            <input type="checkbox" name="simplify_constant_fold" id="id_simplify_constant_fold" checked>
+            <label for="id_simplify_constant_fold">constant fold (simplify only)</label>
+            <br/>
+            <input type="checkbox" name="simplify_shape_inference" id="id_simplify_shape_inference" checked>
+            <label for="id_simplify_shape_inference">shape inference (simplify only)</label>
+            <br/>
+            <label>tensor size threshold (simplify only)</label>
+            <input type="number" name="simplify_tensor_size_threshold" id="id_simplify_tensor_size_threshold" value="1000000000">
+            <br/>
+        </div>
+        <h2>Console outputs:</h2>
+        <pre id="log-output"></pre>
+    </body>
+</html>

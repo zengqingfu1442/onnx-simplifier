@@ -43,7 +43,7 @@ def str_is_logical_positive(x: str) -> bool:
 
 def skip_in_ci():
     return pytest.mark.skipif(
-        str_is_logical_positive(os.getenv("ONNXSIM_CI", "")), reason="memory limited"
+        str_is_logical_positive(os.getenv("CI", "")), reason="memory limited"
     )
 
 
@@ -296,10 +296,33 @@ def test_unset_optional_input():
 
     opset_imports = [onnx.helper.make_opsetid("", 14)]
     
-    model = onnx.helper.make_model(graph_def, opset_imports=opset_imports)
+    model = onnx.helper.make_model(graph_def, opset_imports=opset_imports, ir_version=10)
     sim_model, check_ok = onnxsim.simplify(model, check_n=3)
     assert check_ok
     assert len(model.graph.node) == 1
     assert len(model.graph.initializer) == 2
     assert len(sim_model.graph.node) == 0
     assert len(sim_model.graph.initializer) == 1
+
+
+def test_perform_optimization_false():
+    def _create_dummy_model():
+        class MockModel(torch.nn.Module):
+            def __init__(self):
+                super(MockModel, self).__init__()
+                self.linear = torch.nn.Linear(10, 5)
+
+            def forward(self, x):
+                return self.linear(x)
+
+        model = MockModel()
+        dummy_input = torch.randn(1, 10)
+        onnx_file = "dummy_model.onnx"
+        torch.onnx.export(model, dummy_input, onnx_file)
+        return onnx_file
+
+    onnx_model_path = _create_dummy_model()
+    onnx_model = onnx.load(onnx_model_path)
+    simple_model, _ = onnxsim.simplify(onnx_model, perform_optimization=False, skip_shape_inference=True)
+    assert simple_model is not None
+

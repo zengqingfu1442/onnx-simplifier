@@ -12,6 +12,8 @@ if (EMSCRIPTEN)
   option(onnxruntime_ENABLE_WEBASSEMBLY_THREADS "" OFF)
   option(onnxruntime_BUILD_UNIT_TESTS "" OFF)
   set(onnxruntime_EMSCRIPTEN_SETTINGS "MALLOC=dlmalloc")
+  set(onnxruntime_ENABLE_WEBASSEMBLY_THREADS ON)
+  set(onnxruntime_ENABLE_WEBASSEMBLY_SIMD ON)
 
   # For custom onnx target in onnx optimizer
   set(ONNX_TARGET_NAME onnxruntime_webassembly)
@@ -19,8 +21,11 @@ else()
   # For native build, only shared libs is ok. Otherwise libonnx.a will be linked twice (in onnxruntime and in onnxsim)
   # For emscripten build, since the libonnxruntime_webassembly.a is bundled by `bundle_static_library`, onnxsim can link
   # to the single libonnxruntime_webassembly.a
-  set(BUILD_SHARED_LIBS ON)
   option(onnxruntime_BUILD_SHARED_LIB "" ON)
 endif()
-add_subdirectory(third_party/onnxruntime/cmake)
+set(ONNXRUNTIME_INCLUDE_DIR third_party/onnxruntime-1.23.2/include)
+add_subdirectory(third_party/onnxruntime-1.23.2/cmake)
 
+if (NOT EMSCRIPTEN)
+  set(BUILD_SHARED_LIBS ON)
+endif()

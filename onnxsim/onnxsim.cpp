@@ -9,8 +9,8 @@
 #include <numeric>
 
 #ifndef NO_BUILTIN_ORT
-#include "../third_party/onnxruntime/include/onnxruntime/core/framework/endian.h"
-#include "../third_party/onnxruntime/include/onnxruntime/core/session/onnxruntime_cxx_api.h"
+#include "onnxruntime/core/framework/endian.h"
+#include "onnxruntime/core/session/onnxruntime_cxx_api.h"
 #endif
 #include "onnx/common/file_utils.h"
 #include "onnx/shape_inference/implementation.h"

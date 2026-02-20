@@ -1,66 +1,73 @@
 name: Build and Test
 
-on: [push, pull_request]
-env:
-  ONNXSIM_CI: 1
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  release:
+    types: [published]
 
 jobs:
   build_wheels:
     env:
-      # Only build universal2 package
-      # Related issue: https://github.com/pypa/cibuildwheel/issues/1190
-      CIBW_ARCHS_MACOS: universal2
-      CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
-      CIBW_ENVIRONMENT_PASS_LINUX: ONNXSIM_CI
-      CIBW_BEFORE_ALL_LINUX: WD=`pwd` && /opt/python/cp38-cp38/bin/python -m pip install --target tmp_cmake cmake && cp tmp_cmake/bin/cmake /usr/local/bin/cmake && rm -rf tmp_cmake && /opt/python/cp38-cp38/bin/python -m pip install cmake && cmake --version && whereis cmake
-      CIBW_BEFORE_ALL_MACOS: WD=`pwd` && python3 -m pip install cmake
-      CIBW_TEST_REQUIRES_LINUX: pytest flake8 onnxruntime 
-      CIBW_TEST_REQUIRES_MACOS: pytest onnxruntime 
-      CIBW_TEST_REQUIRES_WINDOWS: pytest onnxruntime 
-      CIBW_BEFORE_TEST_LINUX: pip install torch==1.13.1+cpu torchvision==0.14.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
-      CIBW_BEFORE_TEST_MACOS: pip install torch torchvision
-      CIBW_BEFORE_TEST_WINDOWS: pip install torch torchvision
-      # Skip arm test on x86. Skip python 3.11 test because of the absense of torchvision binary wheel
-      # Skip python3.7 because of onnxruntime has deprecated it
-      CIBW_TEST_SKIP: "cp37-* cp311-* *_arm64 *_universal2:arm64"
-      CIBW_TEST_COMMAND: pytest -v {project}/tests/test_python_api.py
+      CIBW_ARCHS: native
+      CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_ENVIRONMENT_PASS_LINUX: CI SCCACHE_GHA_ENABLED ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_SERVICE_V2
+      CIBW_BEFORE_BUILD: "python3 -m pip install --break-system-packages cmake ninja setuptools sccache"
+      CIBW_TEST_REQUIRES: pytest flake8 onnxruntime onnxscript==0.2.3
+      CIBW_BEFORE_TEST: pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu/
+      CIBW_TEST_COMMAND: pytest -v {project}/tests/test_python_api.py && onnxsim -h
       # Only build on Python 3 and skip 32-bit or musl builds
-      CIBW_BUILD: "cp3?-* cp310-* cp311-*"
-      CIBW_SKIP: "cp36-* *-win32 *-manylinux_i686 *-musllinux_*"
-    name: Build wheels on ${{ matrix.os }}
+      CIBW_SKIP: "*-win32 *-manylinux_i686 *-musllinux_*"
+      CIBW_ENVIRONMENT: CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF" CMAKE_GENERATOR=Ninja CMAKE_CXX_COMPILER_LAUNCHER=sccache
+      SCCACHE_GHA_ENABLED: on
+      ACTIONS_CACHE_SERVICE_V2: on
+    name: Build wheel ${{ matrix.py_ver }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-20.04, windows-2019, macos-11]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, macos-15]
+        py_ver: [cp310, cp312, cp313]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
         fetch-depth: 0
-    - name: Build onnxsim wheels
-      uses: pypa/cibuildwheel@v2.16.5
-      env:
-        CIBW_ENVIRONMENT: CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" ONNXSIM_PKG_NAME=onnxsim
-        CIBW_ENVIRONMENT_WINDOWS: USE_MSVC_STATIC_RUNTIME=0 CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" ONNXSIM_PKG_NAME=onnxsim
-    - name: Build onnx-simplifier wheels
-      uses: pypa/cibuildwheel@v2.16.5
-      env:
-        # set ONNXSIM_PKG_NAME to onnx-simplifier
-        CIBW_ENVIRONMENT: CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" ONNXSIM_PKG_NAME=onnx-simplifier
-        CIBW_ENVIRONMENT_WINDOWS: USE_MSVC_STATIC_RUNTIME=0 CMAKE_ARGS="-DONNX_USE_PROTOBUF_SHARED_LIBS=OFF -DProtobuf_USE_STATIC_LIBS=ON" ONNXSIM_PKG_NAME=onnx-simplifier
-    - uses: actions/upload-artifact@v3
+    - uses: mozilla-actions/sccache-action@v0.0.9
+    - uses: ilammy/msvc-dev-cmd@v1
       with:
-        name: python-dist
+        arch: amd64
+      if: ${{ matrix.os == 'windows-2025' }}
+    - name: Build onnxsim wheels
+      uses: pypa/cibuildwheel@v3.3.1
+      env:
+        CIBW_BUILD: "${{ matrix.py_ver }}-*"
+    - name: Check ABI3
+      run: |
+        pip install abi3audit
+        abi3audit --strict -v --report ./wheelhouse/*.whl
+      if: ${{ contains(fromJSON('["cp312", "cp313"]'), matrix.py_ver) }}
+    - uses: actions/upload-artifact@v4
+      with:
+        name: python-dist-${{ matrix.os }}-${{ matrix.py_ver }}
         path: ./wheelhouse/*.whl
+      if: ${{ !contains(fromJSON('["cp313"]'), matrix.py_ver) }}
 
   build_sdist:
     name: Build source distribution
     runs-on: ubuntu-latest
+    env:
+      CMAKE_GENERATOR: Ninja
+      CMAKE_CXX_COMPILER_LAUNCHER: sccache
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: recursive
         fetch-depth: 0
+    - uses: mozilla-actions/sccache-action@v0.0.9
 
     - name: Update version
       if: startsWith(github.ref, 'refs/tags/v')
@@ -70,130 +77,55 @@ jobs:
     - name: Build sdist
       run: |
         export ONNXSIM_SDIST=ON
-        export ONNXSIM_PKG_NAME=onnxsim
+        pushd scripts/onnx-simplifier
         pipx run build --sdist
-        export ONNXSIM_PKG_NAME=onnx-simplifier
+        mv dist ../..
+        popd
         pipx run build --sdist
 
     - name: Install and test sdist
       run: |
         # It's important to leave the project directory where a 'onnxsim' subdirectory exists
         cd dist
-        python3 -m pip install onnxruntime
+        python3 -m pip install onnxruntime ninja sccache
         python3 -m pip install onnxsim-*.tar.gz
         python3 -c "import onnxsim; print(dir(onnxsim))"
         python3 -m pip uninstall -y onnxsim
-        python3 -m pip install onnx-simplifier-*.tar.gz
+        python3 -m pip install onnx_simplifier-*.tar.gz
         python3 -c "import onnxsim; print(dir(onnxsim))"
         python3 -m pip uninstall -y onnx-simplifier
 
-    - uses: actions/upload-artifact@v3
+        # Disable publish of alias package
+        rm onnx_simplifier-*.tar.gz
+
+    - uses: actions/upload-artifact@v4
       with:
-        name: python-dist
+        name: python-dist-sdist
         path: dist/*.tar.gz
 
   upload_pypi:
+    if: github.event_name == 'push' || github.event_name == 'release'
     name: Upload to PyPI
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/onnxsim
+    permissions:
+      id-token: write
     steps:
-    - uses: actions/download-artifact@v3
+    - uses: actions/download-artifact@v4
       with:
         # unpacks python-dist artifact into dist/
         # if `name: python-dist` is omitted, the action will create extra parent dir
-        name: python-dist
+        pattern: python-dist-*
         path: dist
+        merge-multiple: true
     - name: Publish distribution 📦 to Test PyPI
-      if: ${{ github.ref == 'refs/heads/master' }}
-      uses: pypa/gh-action-pypi-publish@master
+      if: false # ${{ github.ref == 'refs/heads/master' }}
+      uses: pypa/gh-action-pypi-publish@release/v1
       with:
-        password: ${{ secrets.TEST_PYPI_API_TOKEN }}
         repository_url: https://test.pypi.org/legacy/
-        skip_existing: true
     - name: Publish distribution 📦 to PyPI
       if: startsWith(github.ref, 'refs/tags/v')
-      uses: pypa/gh-action-pypi-publish@master
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-
-  build_wasm:
-    name: Build WebAssembly
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: recursive
-    - uses: mymindstorm/setup-emsdk@v11
-    - uses: seanmiddleditch/gha-setup-ninja@v3
-    - name: Verify
-      run: emcc -v
-
-    - name: Build
-      run: ./build_wasm.sh
-
-    - uses: actions/upload-artifact@v3
-      with:
-        name: wasm
-        path: |
-          build-wasm-node-OFF/onnxsim.js
-          build-wasm-node-OFF/onnxsim.wasm
-
-    - name: Upload to convertmodel.com
-      if: ${{ github.ref == 'refs/heads/master' }}
-      run: |
-        wget https://gosspublic.alicdn.com/ossutil/1.7.14/ossutil64
-        chmod 755 ossutil64
-        echo "[Credentials]" >> ~/.ossutilconfig
-        echo "language=EN" >> ~/.ossutilconfig
-        echo "endpoint=oss-cn-beijing.aliyuncs.com" >> ~/.ossutilconfig
-        echo "accessKeyID=${{ secrets.OSS_ACCESS_KEY }}" >> ~/.ossutilconfig
-        echo "accessKeySecret=${{ secrets.OSS_SECRET_KEY }}" >> ~/.ossutilconfig
-        
-        gzip -c -9 build-wasm-node-OFF/onnxsim.wasm > onnxsim_gz.wasm
-        ./ossutil64 --config-file ~/.ossutilconfig cp -u onnxsim_gz.wasm oss://converter-web/onnxsim.wasm --meta=Content-Type:application/wasm#Content-Encoding:gzip
-        ./ossutil64 --config-file ~/.ossutilconfig cp -u build-wasm-node-OFF/onnxsim.js oss://converter-web/
-
-  build_wasm_with_noderawfs:
-    name: Build WebAssembly with NODERAWFS
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: recursive
-    - uses: mymindstorm/setup-emsdk@v11
-    - uses: seanmiddleditch/gha-setup-ninja@v3
-    - name: Verify
-      run: emcc -v
-
-    - name: Build
-      run: ./build_wasm.sh ON
-
-    - uses: actions/upload-artifact@v3
-      with:
-        name: wasm-with-noderawfs
-        path: |
-          build-wasm-node-ON/onnxsim.js
-          build-wasm-node-ON/onnxsim.wasm
-
-  build_native:
-    name: Build Native
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: recursive
-    - uses: seanmiddleditch/gha-setup-ninja@v3
-
-    - name: Build
-      run: |
-        mkdir build-native
-        cd build-native
-        cmake -GNinja ..
-        ninja onnxsim_bin
-
-    - uses: actions/upload-artifact@v3
-      with:
-        name: native
-        path: |
-          build-native/onnxsim
-
+      uses: pypa/gh-action-pypi-publish@release/v1
