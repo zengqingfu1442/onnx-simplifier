@@ -13,9 +13,11 @@
 #include "onnxruntime/core/session/onnxruntime_cxx_api.h"
 #endif
 #include "onnx/common/file_utils.h"
+#include "onnx/defs/printer.h"
 #include "onnx/shape_inference/implementation.h"
 #include "onnxoptimizer/model_util.h"
 #include "onnxoptimizer/optimize.h"
+#include "onnxoptimizer/passes/logging.h"
 
 struct Config {
   std::vector<std::string> optimizer_passes;
@@ -288,6 +290,8 @@ std::vector<onnx::TensorProto> RunOp(onnx::ModelProto& model,
     *op_model.mutable_graph()->add_output() = vi;
   }
 
+  using namespace ONNX_NAMESPACE::optimization;
+  VLOG(1) << "Running node: " << op;
   auto output_tps = ModelExecutor::Run(op_model, input_tps);
   for (size_t i = 0; i < op.output_size(); i++) {
     output_tps[i].set_name(op.output(i));
