@@ -9,13 +9,15 @@
 #include <numeric>
 
 #ifndef NO_BUILTIN_ORT
-#include "../third_party/onnxruntime/include/onnxruntime/core/framework/endian.h"
-#include "../third_party/onnxruntime/include/onnxruntime/core/session/onnxruntime_cxx_api.h"
+#include "onnxruntime/core/framework/endian.h"
+#include "onnxruntime/core/session/onnxruntime_cxx_api.h"
 #endif
 #include "onnx/common/file_utils.h"
+#include "onnx/defs/printer.h"
 #include "onnx/shape_inference/implementation.h"
 #include "onnxoptimizer/model_util.h"
 #include "onnxoptimizer/optimize.h"
+#include "onnxoptimizer/passes/logging.h"
 
 struct Config {
   std::vector<std::string> optimizer_passes;
@@ -288,6 +290,8 @@ std::vector<onnx::TensorProto> RunOp(onnx::ModelProto& model,
     *op_model.mutable_graph()->add_output() = vi;
   }
 
+  using namespace ONNX_NAMESPACE::optimization;
+  VLOG(1) << "Running node: " << op;
   auto output_tps = ModelExecutor::Run(op_model, input_tps);
   for (size_t i = 0; i < op.output_size(); i++) {
     output_tps[i].set_name(op.output(i));
@@ -338,8 +342,9 @@ size_t size_of_dtype(onnx::TensorProto::DataType dtype) {
     // Don't know the size of string.. Just return 16.
     case onnx::TensorProto::DataType::TensorProto_DataType_STRING:
       return 16;
+    default:
     case onnx::TensorProto::DataType::TensorProto_DataType_UNDEFINED:
-      throw std::invalid_argument("Undefined datatype");
+      throw std::invalid_argument("Undefined or unknown datatype");
   }
   throw std::invalid_argument("Unknown datatype " + std::to_string(dtype));
 }

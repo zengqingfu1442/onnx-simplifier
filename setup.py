@@ -1,4 +1,3 @@
-from distutils.spawn import find_executable
 from distutils import sysconfig, log
 import setuptools
 import setuptools.command.build_py
@@ -11,6 +10,7 @@ import glob
 import os
 import shlex
 import subprocess
+import shutil
 import sys
 import platform
 from textwrap import dedent
@@ -25,7 +25,7 @@ CMAKE_BUILD_DIR = os.path.join(TOP_DIR, '.setuptools-cmake-build')
 WINDOWS = (os.name == 'nt')
 MACOS = sys.platform.startswith("darwin")
 
-CMAKE = find_executable('cmake')
+CMAKE = shutil.which('cmake')
 
 install_requires = []
 setup_requires = []
@@ -55,13 +55,20 @@ try:
 except (OSError, subprocess.CalledProcessError):
     git_version = None
 
-if os.getenv('ONNXSIM_SDIST') is not None:
-    version = '0.0.0'
-    git_version = None
+try:
+    dev_count = subprocess.check_output(['git', 'rev-list', '--count', f"v{version}..HEAD"]).decode('ascii').strip()
+except (OSError, subprocess.CalledProcessError):
+    dev_count = None
 
-VersionInfo = namedtuple('VersionInfo', ['version', 'git_version'])(
+if os.getenv('ONNXSIM_RELEASE') is not None:
+    version = os.getenv('ONNXSIM_RELEASE')
+    git_version = None
+    dev_count = None
+
+VersionInfo = namedtuple('VersionInfo', ['version', 'git_version', 'dev_count'])(
     version=version,
-    git_version=git_version
+    git_version=git_version,
+    dev_count=dev_count,
 )
 
 assert CMAKE, 'Could not find "cmake" executable!'
@@ -96,6 +103,7 @@ class create_version(ONNXCommand):
 
             version = '{version}'
             git_version = '{git_version}'
+            dev_count = {dev_count}
             '''.format(**dict(VersionInfo._asdict()))))
 
 
@@ -138,16 +146,12 @@ class cmake_build(setuptools.Command):
                 CMAKE,
                 '-DPython_INCLUDE_DIR={}'.format(sysconfig.get_python_inc()),
                 '-DPython_EXECUTABLE={}'.format(sys.executable),
-                # For pybind11
-                '-DPYTHON_EXECUTABLE={}'.format(sys.executable),
-                '-DBUILD_ONNX_PYTHON=OFF',
+                '-DONNX_BUILD_PYTHON=ON',
                 '-DONNXSIM_PYTHON=ON',
                 '-DONNXSIM_BUILTIN_ORT=OFF',
                 '-DONNX_USE_LITE_PROTO=OFF',
                 '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
                 '-DONNX_NAMESPACE={}'.format(ONNX_NAMESPACE),
-                '-DPY_EXT_SUFFIX={}'.format(
-                    sysconfig.get_config_var('EXT_SUFFIX') or ''),
                 '-DONNX_OPT_USE_SYSTEM_PROTOBUF={}'.format(
                     'ON' if ONNX_OPT_USE_SYSTEM_PROTOBUF else 'OFF'),
             ]
@@ -168,10 +172,6 @@ class cmake_build(setuptools.Command):
                 ])
                 if USE_MSVC_STATIC_RUNTIME:
                     cmake_args.append('-DONNX_USE_MSVC_STATIC_RUNTIME=ON')
-                if platform.architecture()[0] == '64bit':
-                    cmake_args.extend(['-A', 'x64', '-T', 'host=x64'])
-                else:
-                    cmake_args.extend(['-A', 'Win32', '-T', 'host=x86'])
             if MACOS:
                 # Cross-compile support for macOS - respect ARCHFLAGS if set
                 archs = re.findall(r"-arch (\S+)", os.environ.get("ARCHFLAGS", ""))
@@ -194,11 +194,6 @@ class cmake_build(setuptools.Command):
             subprocess.check_call(cmake_args)
 
             build_args = [CMAKE, '--build', os.curdir, '--target onnxsim_cpp2py_export']
-            if WINDOWS:
-                build_args.extend(['--config', build_type])
-                build_args.extend(['--', '/maxcpucount:{}'.format(self.jobs)])
-            else:
-                build_args.extend(['--', '-j', str(self.jobs)])
             print(f"Run command {build_args}")
             subprocess.check_call(build_args)
 
@@ -249,10 +244,21 @@ cmdclass = {
     'develop': develop,
 }
 
+py_limited_api = sys.version_info[0] >= 3 and sys.version_info[1] >= 12
+if py_limited_api:
+    setup_opts = {
+        'bdist_wheel': {
+            'py_limited_api': 'cp312'
+        },
+    }
+else:
+    setup_opts = {}
+
 ext_modules = [
     setuptools.Extension(
         name=str('onnxsim.onnxsim_cpp2py_export'),
-        sources=[])
+        sources=[],
+        py_limited_api=py_limited_api)
 ]
 
 # no need to do fancy stuff so far
@@ -276,14 +282,23 @@ from pathlib import Path
 this_directory = Path(__file__).parent
 long_description = (this_directory / "README.md").read_text()
 
+version_str = VersionInfo.version
+
+if VersionInfo.dev_count is not None:
+    version_str += f".dev{VersionInfo.dev_count}"
+
+# Disabling local version for public release
+# if VersionInfo.git_version is not None:
+#     version_str += f"+{VersionInfo.git_version}"
+
 setuptools.setup(
-    name=os.getenv("ONNXSIM_PKG_NAME", "onnxsim"),
-    version=VersionInfo.version,
+    name="onnxsim",
+    version=version_str,
     description='Simplify your ONNX model',
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     packages=packages,
-    license='Apache License v2.0',
+    license='MIT AND (Apache-2.0 OR BSD-2-Clause)',
     include_package_data=True,
     install_requires=install_requires,
     setup_requires=setup_requires,
@@ -296,7 +311,6 @@ setuptools.setup(
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
-        'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python :: 3 :: Only',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
@@ -312,4 +326,5 @@ setuptools.setup(
             'onnxsim=onnxsim:main',
         ],
     },
+    options=setup_opts,
 )

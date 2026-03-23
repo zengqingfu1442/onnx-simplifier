@@ -10,31 +10,7 @@ import onnxsim
 import torchvision as tv
 import pytest
 
-
-def export_simplify_and_check_by_python_api(
-    m: torch.nn.Module,
-    input: Any,
-    *,
-    is_model_valid: Optional[Callable[[Any], bool]] = None,
-    export_kwargs: Optional[Dict[str, Any]] = None,
-    simplify_kwargs: Optional[Dict[str, Any]] = None,
-) -> onnx.ModelProto:
-    if is_model_valid is None:
-        is_model_valid = lambda _: True
-    if export_kwargs is None:
-        export_kwargs = {}
-    if simplify_kwargs is None:
-        simplify_kwargs = {}
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        model_fn = os.path.join(tmpdirname, "tmp.onnx")
-        torch.onnx.export(m, input, model_fn, **export_kwargs)
-        model = onnx.load(model_fn)
-        if not is_model_valid(model):
-            raise AssertionError(f"model is invalid:\n{model}")
-        # read the model from filesystem to support >2GB large model
-        sim_model, check_ok = onnxsim.simplify(model_fn, check_n=3, **simplify_kwargs)
-        assert check_ok
-        return sim_model
+from onnxsim.test_utils import export_simplify_and_check_by_python_api
 
 
 def str_is_logical_positive(x: str) -> bool:
@@ -43,7 +19,7 @@ def str_is_logical_positive(x: str) -> bool:
 
 def skip_in_ci():
     return pytest.mark.skipif(
-        str_is_logical_positive(os.getenv("ONNXSIM_CI", "")), reason="memory limited"
+        str_is_logical_positive(os.getenv("CI", "")), reason="memory limited"
     )
 
 
@@ -303,3 +279,26 @@ def test_unset_optional_input():
     assert len(model.graph.initializer) == 2
     assert len(sim_model.graph.node) == 0
     assert len(sim_model.graph.initializer) == 1
+
+
+def test_perform_optimization_false():
+    def _create_dummy_model():
+        class MockModel(torch.nn.Module):
+            def __init__(self):
+                super(MockModel, self).__init__()
+                self.linear = torch.nn.Linear(10, 5)
+
+            def forward(self, x):
+                return self.linear(x)
+
+        model = MockModel()
+        dummy_input = torch.randn(1, 10)
+        onnx_file = "dummy_model.onnx"
+        torch.onnx.export(model, dummy_input, onnx_file, dynamo=False)
+        return onnx_file
+
+    onnx_model_path = _create_dummy_model()
+    onnx_model = onnx.load(onnx_model_path)
+    simple_model, _ = onnxsim.simplify(onnx_model, perform_optimization=False, skip_shape_inference=True)
+    assert simple_model is not None
+
