@@ -118,7 +118,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v8
       with:
         # unpacks python-dist artifact into dist/
         # if `name: python-dist` is omitted, the action will create extra parent dir
