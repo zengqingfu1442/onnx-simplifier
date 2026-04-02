@@ -73,7 +73,7 @@ jobs:
       - run: |
           ccache -s
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           # Upload entire repository
           path: 'scripts/convertmodel'
