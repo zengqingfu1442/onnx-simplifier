@@ -34,14 +34,17 @@ ONNX_OPT_USE_SYSTEM_PROTOBUF = bool(os.getenv('ONNX_OPT_USE_SYSTEM_PROTOBUF', '0
 
 DEBUG = bool(os.getenv('DEBUG'))
 COVERAGE = bool(os.getenv('COVERAGE'))
+VERSION_FILE = os.path.join(TOP_DIR, 'VERSION')
 
 try:
     version = subprocess.check_output(['git', 'describe', '--tags', '--abbrev=0'],
                                       cwd=TOP_DIR).decode('ascii').strip()
     if version[0] == 'v':
         version = version[1:]
+    with open(VERSION_FILE, "w") as f:
+        f.write(version + "\n")
 except (OSError, subprocess.CalledProcessError):
-    with open(os.path.join(TOP_DIR, 'VERSION')) as ver_file:
+    with open(VERSION_FILE) as ver_file:
         version = ver_file.read().strip()
 
 try:
