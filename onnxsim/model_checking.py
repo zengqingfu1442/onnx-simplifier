@@ -1,11 +1,10 @@
-import os
 from typing import List, Dict, Optional, Union
-from collections import OrderedDict
 
 import onnx
 import onnx.checker
 import numpy as np
-import onnxruntime as rt
+
+from . import backend
 
 Tensors = Dict[str, np.ndarray]
 TensorShape = List[int]
@@ -133,28 +132,7 @@ def compare(
             inputs: Tensors,
             custom_lib: Optional[str] = None
     ) -> Dict[str, np.ndarray]:
-        sess_options = rt.SessionOptions()
-        if custom_lib is not None:
-            if os.path.exists(custom_lib):
-                sess_options.register_custom_ops_library(custom_lib)
-            else:
-                raise ValueError("No such file '{}'".format(custom_lib))
-        sess_options.graph_optimization_level = rt.GraphOptimizationLevel(0)
-        sess_options.log_severity_level = 3
-        if isinstance(model, onnx.ModelProto):
-            model = model.SerializeToString()
-        sess = rt.InferenceSession(
-            model,
-            sess_options=sess_options,
-            providers=["CPUExecutionProvider"],
-        )
-        outputs = [x.name for x in sess.get_outputs()]
-        run_options = rt.RunOptions()
-        run_options.log_severity_level = 3
-        res = OrderedDict(
-            zip(outputs, sess.run(outputs, inputs, run_options=run_options))
-        )
-        return res
+        return backend.run_model(model, inputs, custom_lib=custom_lib)
 
     if input_shapes is None:
         input_shapes = {}

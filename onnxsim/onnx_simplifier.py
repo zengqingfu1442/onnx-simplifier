@@ -16,17 +16,8 @@ import onnx.checker  # type: ignore
 import onnx.helper  # type: ignore
 import onnx.shape_inference  # type: ignore
 import onnx.numpy_helper  # type: ignore
-try:
-    import onnxruntime as rt  # type: ignore
-except ImportError:
-    command = [sys.executable, '-m', 'pip', 'install', 'onnxruntime']
-    print(Text(f"Installing onnxruntime by `{' '.join(command)}`, please wait for a moment..", style="bold magenta"))
-    import subprocess
-    subprocess.check_call(command)
-    import onnxruntime as rt
-
-
 import onnxsim.onnxsim_cpp2py_export as C
+from . import backend
 from . import model_info
 from . import model_checking
 from . import version
@@ -260,20 +251,10 @@ class PyModelExecutor(C.ModelExecutor):
         input_arrs = map(onnx.numpy_helper.to_array, input_tps)
         input_names = [x.name for x in model.graph.input]
         inputs = dict(zip(input_names, input_arrs))
-        sess_options = rt.SessionOptions()
-        sess_options.graph_optimization_level = rt.GraphOptimizationLevel(0)
-        sess_options.log_severity_level = 3
-        sess = rt.InferenceSession(
-            model.SerializeToString(),
-            sess_options=sess_options,
-            providers=["CPUExecutionProvider"],
-        )
-        output_names = [x.name for x in sess.get_outputs()]
-        run_options = rt.RunOptions()
-        run_options.log_severity_level = 3
-        output_arrs = sess.run(output_names, inputs, run_options=run_options)
+        outputs = backend.run_model(model, inputs)
         return [
-            onnx.numpy_helper.from_array(x).SerializeToString() for x in output_arrs
+            onnx.numpy_helper.from_array(x).SerializeToString()
+            for x in outputs.values()
         ]
 
 
@@ -460,6 +441,12 @@ def main():
     overwrite_input_shapes = parse_shapes(args.overwrite_input_shape)
 
     if args.enable_onnxruntime_optimization:
+        if not backend.has_onnxruntime():
+            raise RuntimeError(
+                "--enable-onnxruntime-optimization requires onnxruntime, "
+                "please install it by `pip install onnxruntime`."
+            )
+        import onnxruntime as rt
 
         tmp_file = tempfile.NamedTemporaryFile()
         sess_options = rt.SessionOptions()

@@ -1,5 +1,7 @@
 onnx
 onnxoptimizer >= 0.2.5
+# onnxruntime is optional; onnxsim falls back to onnx's reference evaluator
+# when it is not installed. See https://github.com/onnxsim/onnxsim/issues/441
 onnxruntime >= 1.6.0
 protobuf >= 3.7.0
 rich != 12.1.0

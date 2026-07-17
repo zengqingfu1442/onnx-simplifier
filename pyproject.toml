@@ -29,6 +29,11 @@ classifiers = [
     "Topic :: Software Development",
 ]
 
+[project.optional-dependencies]
+# onnxruntime is preferred for constant folding and correctness checking.
+# When it is not installed, onnxsim falls back to onnx's reference evaluator.
+onnxruntime = ["onnxruntime >= 1.6.0"]
+
 [project.urls]
 Homepage = "https://github.com/onnxsim/onnxsim"
 
