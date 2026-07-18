@@ -23,8 +23,8 @@ else()
   # to the single libonnxruntime_webassembly.a
   option(onnxruntime_BUILD_SHARED_LIB "" ON)
 endif()
-set(ONNXRUNTIME_INCLUDE_DIR third_party/onnxruntime-1.23.2/include)
-add_subdirectory(third_party/onnxruntime-1.23.2/cmake)
+set(ONNXRUNTIME_INCLUDE_DIR third_party/onnxruntime-1.27.1/include)
+add_subdirectory(third_party/onnxruntime-1.27.1/cmake)
 
 if (NOT EMSCRIPTEN)
   set(BUILD_SHARED_LIBS ON)

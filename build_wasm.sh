@@ -17,12 +17,11 @@ fi
 
 set -u -o pipefail
 
-ORT_VER=1.23.2
+ORT_VER=1.27.1
 if [ ! -d "third_party/onnxruntime-${ORT_VER}" ] ; then
     pushd third_party
     wget -q "https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ORT_VER}.zip"
     unzip -q "v${ORT_VER}.zip"
-    curl -L https://github.com/onnx/onnx/pull/7609.diff >> "onnxruntime-${ORT_VER}/cmake/patches/onnx/onnx.patch"
     popd
 fi
 

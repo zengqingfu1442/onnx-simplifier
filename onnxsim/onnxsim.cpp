@@ -10,7 +10,7 @@
 #include <unordered_map>
 
 #ifndef NO_BUILTIN_ORT
-#include "onnxruntime/core/framework/endian.h"
+#include "onnxruntime/core/common/endian.h"
 #include "onnxruntime/core/session/onnxruntime_cxx_api.h"
 #endif
 #include "onnx/common/file_utils.h"
