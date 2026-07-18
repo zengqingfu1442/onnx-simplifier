@@ -31,6 +31,7 @@ ONNX_VERIFY_PROTO3 = bool(os.getenv('ONNX_VERIFY_PROTO3') == '1')
 ONNX_NAMESPACE = os.getenv('ONNX_NAMESPACE', 'onnx')
 ONNX_BUILD_TESTS = bool(os.getenv('ONNX_BUILD_TESTS') == '1')
 ONNX_OPT_USE_SYSTEM_PROTOBUF = bool(os.getenv('ONNX_OPT_USE_SYSTEM_PROTOBUF', '0') == '1')
+IS_FREE_THREADED = sysconfig.get_config_var("Py_GIL_DISABLED")
 
 DEBUG = bool(os.getenv('DEBUG'))
 COVERAGE = bool(os.getenv('COVERAGE'))
@@ -146,14 +147,6 @@ class cmake_build(setuptools.Command):
                 CMAKE,
                 '-DPython_INCLUDE_DIR={}'.format(sysconfig.get_path('include')),
                 '-DPython_EXECUTABLE={}'.format(sys.executable),
-                # onnx's CMake calls find_package(Python3 ...) first, which does
-                # not see the Python_ prefixed hints. Without these, CMake >= 4.4
-                # defaults Python3_FIND_ABI to "ANY;ANY;ANY;OFF" and rejects a
-                # free-threaded (Py_GIL_DISABLED) interpreter, then wanders off to
-                # a non-venv python. Mirror the hints under the Python3_ prefix.
-                # '-DPython3_EXECUTABLE={}'.format(sys.executable),
-                # '-DPython3_ROOT_DIR={}'.format(sys.prefix),
-                '-DPython3_FIND_ABI=ANY;ANY;ANY;ANY',
                 '-DONNX_BUILD_PYTHON=ON',
                 "-DONNX_INSTALL=OFF",
                 '-DONNXSIM_PYTHON=ON',
@@ -164,6 +157,8 @@ class cmake_build(setuptools.Command):
                 '-DONNX_OPT_USE_SYSTEM_PROTOBUF={}'.format(
                     'ON' if ONNX_OPT_USE_SYSTEM_PROTOBUF else 'OFF'),
             ]
+            if IS_FREE_THREADED:
+                cmake_args.append('-DPython3_FIND_ABI=ANY;ANY;ANY;ANY')
             if COVERAGE:
                 cmake_args.append('-DONNX_COVERAGE=ON')
             if COVERAGE or DEBUG:
@@ -254,7 +249,7 @@ cmdclass = {
 }
 
 py_limited_api = sys.version_info[0] >= 3 and sys.version_info[1] >= 12 and \
-    not sysconfig.get_config_var("Py_GIL_DISABLED")
+    not IS_FREE_THREADED
 if py_limited_api:
     setup_opts = {
         'bdist_wheel': {
