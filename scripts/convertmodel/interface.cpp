@@ -22,6 +22,7 @@ em::val onnxsimplify_export(const std::string& data, em::val skip_optimizers, bo
     onnx::ModelProto optimized;
     try {
         optimized = Simplify(
+            *GetBuiltinModelExecutor(),
             xmodel,
             em::vecFromJSArray<std::string>(skip_optimizers),
             constant_folding,

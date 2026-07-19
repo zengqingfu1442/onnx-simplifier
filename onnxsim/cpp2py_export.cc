@@ -69,7 +69,8 @@ NB_MODULE(onnxsim_cpp2py_export, m) {
   using namespace py::literals;
 
   m.def("simplify",
-        [](const py::bytes& model_proto_bytes,
+        [](std::shared_ptr<PyModelExecutor> executor,
+           const py::bytes& model_proto_bytes,
            std::optional<std::vector<std::string>> skip_optimizers,
            bool constant_folding, bool shape_inference,
            size_t tensor_size_threshold) -> py::bytes {
@@ -77,31 +78,30 @@ NB_MODULE(onnxsim_cpp2py_export, m) {
           InitEnv();
           ONNX_NAMESPACE::ModelProto model;
           ParseProtoFromBytes(&model, model_proto_bytes.c_str(), model_proto_bytes.size());
-          auto const result = Simplify(model, skip_optimizers, constant_folding,
-                                       shape_inference, tensor_size_threshold);
+          auto const result = Simplify(*executor, model, skip_optimizers,
+                                       constant_folding, shape_inference,
+                                       tensor_size_threshold);
           std::string out;
           result.SerializeToString(&out);
           return py::bytes(out.data(), out.size());
-        }, "model_bytes"_a, "skip_optimizers"_a.none(),
+        }, "executor"_a, "model_bytes"_a, "skip_optimizers"_a.none(),
         "constant_folding"_a = true, "shape_inference"_a = true, "tensor_size_threshold"_a)
       .def("simplify_path",
-           [](const std::string& in_path, const std::string& out_path,
+           [](std::shared_ptr<PyModelExecutor> executor,
+              const std::string& in_path, const std::string& out_path,
               std::optional<std::vector<std::string>> skip_optimizers,
               bool constant_folding, bool shape_inference,
               size_t tensor_size_threshold) -> bool {
              // force env initialization to register opset
              InitEnv();
-             SimplifyPath(in_path, out_path, skip_optimizers, constant_folding,
-                          shape_inference, tensor_size_threshold);
+             SimplifyPath(*executor, in_path, out_path, skip_optimizers,
+                          constant_folding, shape_inference,
+                          tensor_size_threshold);
              return true;
-           }, "in_path"_a, "out_path"_a,
+           }, "executor"_a, "in_path"_a, "out_path"_a,
            "skip_optimizers"_a.none(),
            "constant_folding"_a = true, "shape_inference"_a = true,
            "tensor_size_threshold"_a)
-      .def("_set_model_executor",
-           [](std::shared_ptr<PyModelExecutor> executor) {
-             ModelExecutor::set_instance(std::move(executor));
-           }, "executor"_a.none())
       .def("_list_optimizers",
            []() {
             py::list ret;

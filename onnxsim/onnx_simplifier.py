@@ -199,6 +199,7 @@ def simplify(
             model_bytes = None
             raise EncodeError("Message larger than 2GiB")
         model_opt_bytes = C.simplify(
+            _get_model_executor(),
             model_bytes,
             skipped_optimizers,
             not skip_constant_folding,
@@ -221,6 +222,7 @@ def simplify(
                 save_as_external_data=True,
             )
             check_ok = C.simplify_path(
+                _get_model_executor(),
                 os.path.join(tmpdirname, 'model.onnx'),
                 os.path.join(tmpdirname, 'opt.onnx'),
                 skipped_optimizers,
@@ -256,6 +258,21 @@ class PyModelExecutor(C.ModelExecutor):
             onnx.numpy_helper.from_array(x).SerializeToString()
             for x in outputs.values()
         ]
+
+
+_model_executor: Optional[PyModelExecutor] = None
+
+
+def _get_model_executor() -> PyModelExecutor:
+    """Return the process-wide Python model executor, creating it on demand.
+
+    The executor is passed explicitly to the C++ ``simplify``/``simplify_path``
+    entry points instead of being registered as a global instance.
+    """
+    global _model_executor
+    if _model_executor is None:
+        _model_executor = PyModelExecutor()
+    return _model_executor
 
 
 def main():

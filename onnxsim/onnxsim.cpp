@@ -29,8 +29,6 @@ struct Config {
 
 Config config;
 
-std::shared_ptr<const ModelExecutor> ModelExecutor::instance_ = nullptr;
-
 bool IsOfficialOp(const std::string& domain, const std::string& op) {
   if (domain != "ai.onnx" && domain != "ai.onnx.ml" && !domain.empty()) {
     return false;
@@ -239,10 +237,11 @@ struct CppModelExecutor : public ModelExecutor {
   }
 };
 
-static int __register_cpp_model_executor __attribute__((unused)) = []() {
-  ModelExecutor::set_instance(std::make_shared<CppModelExecutor>());
-  return 0;
-}();
+std::shared_ptr<const ModelExecutor> GetBuiltinModelExecutor() {
+  static std::shared_ptr<const ModelExecutor> executor =
+      std::make_shared<CppModelExecutor>();
+  return executor;
+}
 
 void InitEnv() { GetEnv(); }
 #else
@@ -251,7 +250,8 @@ void InitEnv() {
 }
 #endif
 
-std::vector<onnx::TensorProto> RunOp(onnx::ModelProto& model,
+std::vector<onnx::TensorProto> RunOp(const ModelExecutor& executor,
+                                     onnx::ModelProto& model,
                                      const onnx::NodeProto& op) {
   std::vector<std::string> input_names;
   std::vector<onnx::TensorProto> input_tps;
@@ -302,16 +302,17 @@ std::vector<onnx::TensorProto> RunOp(onnx::ModelProto& model,
 
   using namespace ONNX_NAMESPACE::optimization;
   VLOG(1) << "Running node: " << op;
-  auto output_tps = ModelExecutor::Run(op_model, input_tps);
+  auto output_tps = executor._Run(op_model, input_tps);
   for (size_t i = 0; i < op.output_size(); i++) {
     output_tps[i].set_name(op.output(i));
   }
   return output_tps;
 }
 
-void RunOpAndAddInitializer(onnx::ModelProto& model,
+void RunOpAndAddInitializer(const ModelExecutor& executor,
+                            onnx::ModelProto& model,
                             const onnx::NodeProto& op) {
-  const auto output_tps = RunOp(model, op);
+  const auto output_tps = RunOp(executor, model, op);
   for (const auto& output_tp : output_tps) {
     *model.mutable_graph()->add_initializer() = output_tp;
   }
@@ -440,7 +441,8 @@ onnx::ModelProto _InferShapes(const onnx::ModelProto& model) {
   return result;
 }
 
-onnx::ModelProto _FoldConstant(const onnx::ModelProto& model) {
+onnx::ModelProto _FoldConstant(const ModelExecutor& executor,
+                               const onnx::ModelProto& model) {
   const auto& tmp = model;
   {
     onnx::ModelProto model;
@@ -448,7 +450,7 @@ onnx::ModelProto _FoldConstant(const onnx::ModelProto& model) {
     auto [const_nodes, non_const_nodes] = GetConstantNodes(model);
     for (const auto& x : const_nodes) {
       try {
-        RunOpAndAddInitializer(model, x);
+        RunOpAndAddInitializer(executor, model, x);
       } catch (const std::exception& e) {
         std::cerr << "WARNING: failed to run \"" << x.op_type() <<
           "\" op (name is \"" << x.name() << "\"), skip..." << std::endl;
@@ -513,7 +515,7 @@ onnx::ModelProto Identity(const onnx::ModelProto& model) { return model; }
 void Check(const onnx::ModelProto& model) { onnx::checker::check_model(model); }
 
 onnx::ModelProto Simplify(
-    const onnx::ModelProto& model,
+    const ModelExecutor& executor, const onnx::ModelProto& model,
     std::optional<std::vector<std::string>> skip_optimizers,
     bool constant_folding, bool shape_inference, size_t tensor_size_threshold) {
   Check(model);
@@ -534,7 +536,14 @@ onnx::ModelProto Simplify(
     config.optimizer_passes = passes;
   }
 
-  auto FoldConstant = constant_folding ? _FoldConstant : Identity;
+  std::function<onnx::ModelProto(const onnx::ModelProto&)> FoldConstant;
+  if (constant_folding) {
+    FoldConstant = [&executor](const onnx::ModelProto& model) {
+      return _FoldConstant(executor, model);
+    };
+  } else {
+    FoldConstant = Identity;
+  }
   auto InferShapes = shape_inference ? _InferShapes : Identity;
 
   int fixed_point_iters =
@@ -560,15 +569,16 @@ onnx::ModelProto Simplify(
   return sim_model;
 }
 
-void SimplifyPath(const std::string& in_path, const std::string& out_path,
+void SimplifyPath(const ModelExecutor& executor, const std::string& in_path,
+                  const std::string& out_path,
                   std::optional<std::vector<std::string>> skip_optimizers,
                   bool constant_folding, bool shape_inference,
                   size_t tensor_size_threshold) {
   onnx::ModelProto model;
   onnx::optimization::loadModel(&model, in_path, true);
 
-  model = Simplify(model, skip_optimizers, constant_folding, shape_inference,
-                   tensor_size_threshold);
+  model = Simplify(executor, model, skip_optimizers, constant_folding,
+                   shape_inference, tensor_size_threshold);
 
   onnx::optimization::saveModel(&model, out_path, true, "");
 }

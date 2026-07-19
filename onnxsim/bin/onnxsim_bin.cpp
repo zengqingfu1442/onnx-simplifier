@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
   onnx::LoadProtoFromPath(input_model_filename, model);
 
   model = Simplify(
-      model,
+      *GetBuiltinModelExecutor(), model,
       no_opt ? std::nullopt : std::make_optional<std::vector<std::string>>({}),
       !no_sim, !no_shape_inference, SIZE_MAX);
 
