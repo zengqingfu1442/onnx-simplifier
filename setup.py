@@ -197,7 +197,7 @@ class cmake_build(setuptools.Command):
             print(f"Run command {cmake_args}")
             subprocess.check_call(cmake_args)
 
-            build_args = [CMAKE, '--build', os.curdir, '--target onnxsim_cpp2py_export']
+            build_args = [CMAKE, '--build', os.curdir, '--target', 'onnxsim_cpp2py_export']
             print(f"Run command {build_args}")
             subprocess.check_call(build_args)
 
