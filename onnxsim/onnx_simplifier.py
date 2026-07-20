@@ -315,6 +315,17 @@ def _get_model_executor() -> PyModelExecutor:
 
 
 def main():
+    # onnxsim runs models through native libraries (onnx shape inference,
+    # onnxoptimizer and onnxruntime). A malformed or unusual model can make one
+    # of them crash with a segmentation fault instead of a Python exception,
+    # which is very hard to diagnose from a bare "Segmentation fault" message
+    # (see GitHub issue #426). Enabling faulthandler makes such native crashes
+    # dump a Python traceback to stderr, pinpointing the phase that crashed.
+    import faulthandler
+
+    if not faulthandler.is_enabled():
+        faulthandler.enable()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("input_model", help="Input ONNX model")
     parser.add_argument("output_model", help="Output ONNX model")
