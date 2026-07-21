@@ -95,6 +95,17 @@ assert check, "Simplified ONNX model could not be validated"
 
 You can see more details of the API in [onnxsim/onnx_simplifier.py](onnxsim/onnx_simplifier.py)
 
+## Custom operators
+
+Models that contain custom operators, such as TensorRT plugins
+(`BatchedNMS_TRT`, `EfficientNMS_TRT`, ...), are supported. onnxsim keeps these
+ops unchanged and simplifies the rest of the graph around them. This works
+whether the custom op lives in a vendor-specific domain (e.g. `TRT`) or in the
+default ONNX domain, so you no longer need to manually move it into a custom
+domain to get past validation (issues
+[#107](https://github.com/onnxsim/onnxsim/issues/107) and
+[#220](https://github.com/onnxsim/onnxsim/issues/220)).
+
 ## Projects Using ONNX Simplifier
 
 * [MXNet](https://mxnet.apache.org/versions/1.9.1/api/python/docs/tutorials/deploy/export/onnx.html#Simplify-the-exported-ONNX-model)

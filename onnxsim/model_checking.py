@@ -1,7 +1,8 @@
-from typing import List, Dict, Optional, Union
+from typing import Iterable, List, Dict, Optional, Set, Union
 
 import onnx
 import onnx.checker
+import onnx.defs
 import numpy as np
 
 from . import backend
@@ -9,6 +10,40 @@ from . import backend
 Tensors = Dict[str, np.ndarray]
 TensorShape = List[int]
 TensorShapes = Dict[Optional[str], TensorShape]
+
+
+def _iter_graph_nodes(graph: onnx.GraphProto) -> Iterable[onnx.NodeProto]:
+    """Yield every node in ``graph``, recursing into subgraph attributes."""
+    for node in graph.node:
+        yield node
+        for attr in node.attribute:
+            if attr.HasField("g"):
+                yield from _iter_graph_nodes(attr.g)
+            for subgraph in attr.graphs:
+                yield from _iter_graph_nodes(subgraph)
+
+
+def _custom_default_domain_ops(model: onnx.ModelProto) -> Set[str]:
+    """Return op types in the default ONNX domain that have no ONNX schema.
+
+    These are custom operators such as TensorRT plugins (e.g. ``BatchedNMS_TRT``)
+    that were exported into the default domain. ``onnx.checker.check_model``
+    rejects such a model with "No Op registered for <op> with domain_version of
+    <n>" (GitHub issues #107, #220). onnxsim preserves these ops unchanged, so
+    the checker error about them is expected and tolerated.
+    """
+    try:
+        known = {
+            (schema.domain, schema.name)
+            for schema in onnx.defs.get_all_schemas_with_history()
+        }
+    except Exception:
+        known = set()
+    custom_ops = set()
+    for node in _iter_graph_nodes(model.graph):
+        if node.domain in ("", "ai.onnx") and ("", node.op_type) not in known:
+            custom_ops.add(node.op_type)
+    return custom_ops
 
 
 def compare(
@@ -136,7 +171,24 @@ def compare(
 
     if input_shapes is None:
         input_shapes = {}
-    onnx.checker.check_model(model_opt)
+    try:
+        onnx.checker.check_model(model_opt)
+    except onnx.checker.ValidationError as e:
+        # A model containing a custom op in the default ONNX domain (e.g. a
+        # TensorRT plugin like BatchedNMS_TRT) fails validation with "No Op
+        # registered for <op> ...". onnxsim preserves such ops unchanged, so
+        # tolerate that specific error instead of failing (GitHub issues #107,
+        # #220). Any other validation error is a genuine problem and re-raised.
+        custom_ops = _custom_default_domain_ops(model_opt)
+        message = str(e)
+        if custom_ops and any(op in message for op in custom_ops):
+            print(
+                "The model contains custom operator(s) {} in the default ONNX "
+                "domain (e.g. a TensorRT plugin). They are preserved unchanged "
+                "and skipped during model checking.".format(sorted(custom_ops))
+            )
+        else:
+            raise
     for i in range(n_times):
         print(f'Checking {i}/{n_times}...')
         if input_data is None:

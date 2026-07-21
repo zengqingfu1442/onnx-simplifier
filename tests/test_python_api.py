@@ -595,6 +595,113 @@ def test_run_coerces_non_ndarray_output():
     assert check_ok
 
 
+def _make_batched_nms_trt_model():
+    # A model whose only compute node is the TensorRT plugin ``BatchedNMS_TRT``
+    # exported into the *default* ONNX domain, exactly as reported in GitHub
+    # issue #107 ("No Op registered for BatchedNMS_TRT with domain_version of 9").
+    boxes = onnx.helper.make_tensor_value_info(
+        "boxes", onnx.TensorProto.FLOAT, [1, 100, 1, 4]
+    )
+    scores = onnx.helper.make_tensor_value_info(
+        "scores", onnx.TensorProto.FLOAT, [1, 100, 5]
+    )
+    num_detections = onnx.helper.make_tensor_value_info(
+        "num_detections", onnx.TensorProto.INT32, [1, 1]
+    )
+    nmsed_boxes = onnx.helper.make_tensor_value_info(
+        "nmsed_boxes", onnx.TensorProto.FLOAT, [1, 20, 4]
+    )
+    nmsed_scores = onnx.helper.make_tensor_value_info(
+        "nmsed_scores", onnx.TensorProto.FLOAT, [1, 20]
+    )
+    nmsed_classes = onnx.helper.make_tensor_value_info(
+        "nmsed_classes", onnx.TensorProto.FLOAT, [1, 20]
+    )
+    node = onnx.helper.make_node(
+        "BatchedNMS_TRT",
+        ["boxes", "scores"],
+        ["num_detections", "nmsed_boxes", "nmsed_scores", "nmsed_classes"],
+        # plugin-specific attributes of assorted types
+        shareLocation=1,
+        backgroundLabelId=-1,
+        numClasses=5,
+        topK=100,
+        keepTopK=20,
+        scoreThreshold=0.3,
+        iouThreshold=0.5,
+        isNormalized=1,
+        clipBoxes=1,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "batched_nms_trt",
+        [boxes, scores],
+        [num_detections, nmsed_boxes, nmsed_scores, nmsed_classes],
+    )
+    model = onnx.helper.make_model(
+        graph, opset_imports=[onnx.helper.make_opsetid("", 9)]
+    )
+    model.ir_version = 6
+    return model
+
+
+def test_custom_trt_op_in_default_domain_is_simplified():
+    # Regression test for GitHub issues #107 and #220. A custom TensorRT plugin
+    # op (``BatchedNMS_TRT``) exported into the default ONNX domain used to make
+    # onnxsim fail in onnx.checker.check_model with
+    #     No Op registered for BatchedNMS_TRT with domain_version of 9
+    # onnxsim now registers a permissive placeholder schema for such ops so the
+    # model passes validation and is simplified with the op preserved.
+    model = _make_batched_nms_trt_model()
+
+    sim_model, check_ok = onnxsim.simplify(model)
+    assert check_ok
+
+    nms_nodes = [n for n in sim_model.graph.node if n.op_type == "BatchedNMS_TRT"]
+    assert len(nms_nodes) == 1
+    # The op stays in the default domain and keeps its attributes.
+    assert nms_nodes[0].domain in ("", "ai.onnx")
+    attr_names = {a.name for a in nms_nodes[0].attribute}
+    assert {"numClasses", "keepTopK", "iouThreshold"} <= attr_names
+
+
+def test_custom_trt_op_does_not_block_surrounding_simplification():
+    # The presence of a default-domain custom op must not prevent onnxsim from
+    # simplifying the rest of the graph. Here a redundant Identity feeding the
+    # plugin should be eliminated while the custom op survives (issues #107/#220).
+    boxes = onnx.helper.make_tensor_value_info(
+        "boxes", onnx.TensorProto.FLOAT, [1, 100, 1, 4]
+    )
+    scores = onnx.helper.make_tensor_value_info(
+        "scores", onnx.TensorProto.FLOAT, [1, 100, 5]
+    )
+    out = onnx.helper.make_tensor_value_info(
+        "num_detections", onnx.TensorProto.INT32, [1, 1]
+    )
+    nodes = [
+        onnx.helper.make_node("Identity", ["boxes"], ["boxes_id"]),
+        onnx.helper.make_node(
+            "BatchedNMS_TRT",
+            ["boxes_id", "scores"],
+            ["num_detections"],
+            numClasses=5,
+            topK=100,
+            keepTopK=20,
+        ),
+    ]
+    graph = onnx.helper.make_graph(nodes, "g", [boxes, scores], [out])
+    model = onnx.helper.make_model(
+        graph, opset_imports=[onnx.helper.make_opsetid("", 11)]
+    )
+    model.ir_version = 6
+
+    sim_model, check_ok = onnxsim.simplify(model)
+    assert check_ok
+    op_types = [n.op_type for n in sim_model.graph.node]
+    assert "Identity" not in op_types
+    assert op_types.count("BatchedNMS_TRT") == 1
+
+
 def test_perform_optimization_false():
     def _create_dummy_model():
         class MockModel(torch.nn.Module):
