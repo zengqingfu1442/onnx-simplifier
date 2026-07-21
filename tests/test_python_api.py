@@ -560,38 +560,33 @@ def test_unknown_contrib_op_is_tolerated():
 
 
 def test_run_coerces_non_ndarray_output():
-    # Regression test for GitHub PR #249. When the inference backend returns a
-    # non-ndarray value for an output -- for example onnxruntime yields an empty
-    # Python list for an empty sequence output -- the executor used to crash
-    # inside onnx.numpy_helper.from_array with
+    # Regression test for GitHub PR #249. The inference backend returns a
+    # non-ndarray value for a sequence output: a SequenceEmpty op produces an
+    # empty Python list rather than a numpy array. Passing that straight to
+    # onnx.numpy_helper.from_array used to crash the executor with
     #     AttributeError: 'list' object has no attribute 'shape'
     # The executor must coerce such a value into an (empty) numpy array so the
     # serialization keeps working.
-    from collections import OrderedDict
     from onnxsim import onnx_simplifier
 
-    node = onnx.helper.make_node("Relu", ["x"], ["y"])
-    x = onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1])
-    y = onnx.helper.make_tensor_value_info("y", onnx.TensorProto.FLOAT, [1])
-    graph = onnx.helper.make_graph([node], "g", [x], [y])
+    node = onnx.helper.make_node(
+        "SequenceEmpty", [], ["seq"], dtype=onnx.TensorProto.FLOAT
+    )
+    seq_out = onnx.helper.make_value_info(
+        "seq",
+        onnx.helper.make_sequence_type_proto(
+            onnx.helper.make_tensor_type_proto(onnx.TensorProto.FLOAT, None)
+        ),
+    )
+    graph = onnx.helper.make_graph([node], "g", [], [seq_out])
     model = onnx.helper.make_model(
         graph, opset_imports=[onnx.helper.make_opsetid("", 13)]
     )
 
+    # Drive the executor with the real backend: SequenceEmpty yields an empty
+    # list, exercising the exact code path that used to raise.
     executor = onnx_simplifier.PyModelExecutor()
-
-    # Simulate the backend returning an empty list instead of a numpy array.
-    original_run_model = onnx_simplifier.backend.run_model
-    onnx_simplifier.backend.run_model = lambda *a, **k: OrderedDict([("y", [])])
-    try:
-        input_tensor = onnx.numpy_helper.from_array(
-            np.zeros((1,), dtype=np.float32), "x"
-        )
-        outputs = executor.Run(
-            model.SerializeToString(), [input_tensor.SerializeToString()]
-        )
-    finally:
-        onnx_simplifier.backend.run_model = original_run_model
+    outputs = executor.Run(model.SerializeToString(), [])
 
     assert len(outputs) == 1
     result_tp = onnx.TensorProto()
