@@ -182,11 +182,18 @@ def test_ext():
 
 def test_unfoldable_const_node_keeps_topological_order():
     # A const node (all-constant inputs) that fails to fold must keep its
-    # original position. Here SequenceEmpty is treated as a const node but can't
-    # be folded into an initializer; its output feeds a non-const consumer
-    # (SequenceInsert). If the failed node were moved to the end of the graph it
-    # would land after its consumer and break topological sorting, making the
-    # output fail onnx's checker (issues #238, #335, #352).
+    # original position. Here SequenceEmpty is treated as a const node; its
+    # output feeds a non-const consumer (SequenceInsert). If a failed const node
+    # were moved to the end of the graph it would land after its consumer and
+    # break topological sorting, making the output fail onnx's checker (issues
+    # #238, #335, #352).
+    #
+    # Constant folding is disabled here on purpose: SequenceEmpty produces a
+    # sequence value, which the backend returns as an empty list. Folding would
+    # coerce that into an empty *tensor* initializer and drop the node, which is
+    # semantically wrong for a sequence. Skipping folding keeps the sequence
+    # pipeline intact so we exercise the topological ordering of the preserved
+    # nodes.
     x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2])
     nodes = [
@@ -198,7 +205,7 @@ def test_unfoldable_const_node_keeps_topological_order():
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     onnx.checker.check_model(model)
 
-    sim_model, check_ok = onnxsim.simplify(model)
+    sim_model, check_ok = onnxsim.simplify(model, skip_constant_folding=True)
     assert check_ok
     # Output must remain a valid, topologically sorted graph.
     onnx.checker.check_model(sim_model)

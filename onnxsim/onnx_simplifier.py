@@ -306,8 +306,13 @@ class PyModelExecutor(C.ModelExecutor):
         input_names = [x.name for x in model.graph.input]
         inputs = dict(zip(input_names, input_arrs))
         outputs = backend.run_model(model, inputs)
+        # The inference backend may return a non-ndarray for an output (for
+        # example onnxruntime yields an empty Python list for an empty sequence
+        # output). onnx.numpy_helper.from_array only accepts numpy arrays, so
+        # coerce any such value into an empty array instead of crashing with
+        # "'list' object has no attribute 'shape'" (GitHub PR #249).
         return [
-            onnx.numpy_helper.from_array(x).SerializeToString()
+            onnx.numpy_helper.from_array(x).SerializeToString() if isinstance(x, np.ndarray) else x
             for x in outputs.values()
         ]
 
