@@ -449,18 +449,34 @@ onnx::ModelProto _FoldConstant(const ModelExecutor& executor,
     onnx::ModelProto model;
     model.CopyFrom(tmp);
     auto [const_nodes, non_const_nodes] = GetConstantNodes(model);
+    (void)non_const_nodes;
+    // Outputs of const nodes that were successfully folded into initializers.
+    std::set<std::string> folded_outputs;
     for (const auto& x : const_nodes) {
       try {
         RunOpAndAddInitializer(executor, model, x);
+        for (const auto& output : x.output()) {
+          folded_outputs.insert(output);
+        }
       } catch (const std::exception& e) {
         std::cerr << "WARNING: failed to run \"" << x.op_type() <<
           "\" op (name is \"" << x.name() << "\"), skip..." << std::endl;
-        non_const_nodes.push_back(x);
       }
     }
-    model.mutable_graph()->clear_node();
-    for (const auto& x : non_const_nodes) {
-      *model.mutable_graph()->add_node() = x;
+    // Rebuild the node list in its original topological order, dropping only
+    // the const nodes that were successfully folded into initializers. A const
+    // node that failed to fold must keep its original position: appending it to
+    // the end can place it after a non-const consumer (e.g. a Loop reading a
+    // SequenceEmpty output), which breaks topological sorting and makes the
+    // resulting model fail onnx's checker (issues #238, #335, #352).
+    google::protobuf::RepeatedPtrField<onnx::NodeProto> original_nodes;
+    original_nodes.Swap(model.mutable_graph()->mutable_node());
+    for (auto& node : original_nodes) {
+      const bool folded = node.output_size() > 0 &&
+                          folded_outputs.count(node.output(0)) > 0;
+      if (!folded) {
+        *model.mutable_graph()->add_node() = std::move(node);
+      }
     }
     return model;
   }

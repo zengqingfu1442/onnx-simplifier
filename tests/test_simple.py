@@ -5,6 +5,7 @@ import onnxruntime
 import onnxsim
 import os
 
+from onnx import helper, TensorProto
 from typing import Optional
 from onnxsim.test_utils import export_simplify_and_check_by_python_api
 
@@ -177,3 +178,29 @@ def test_ext():
         sim_model, check_ok = onnxsim.simplify(model_fn, check_n=0)
         module = None
         assert check_ok
+
+
+def test_unfoldable_const_node_keeps_topological_order():
+    # A const node (all-constant inputs) that fails to fold must keep its
+    # original position. Here SequenceEmpty is treated as a const node but can't
+    # be folded into an initializer; its output feeds a non-const consumer
+    # (SequenceInsert). If the failed node were moved to the end of the graph it
+    # would land after its consumer and break topological sorting, making the
+    # output fail onnx's checker (issues #238, #335, #352).
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [2])
+    nodes = [
+        helper.make_node("SequenceEmpty", [], ["seq"]),
+        helper.make_node("SequenceInsert", ["seq", "x"], ["seq2"]),
+        helper.make_node("ConcatFromSequence", ["seq2"], ["y"], axis=0, new_axis=0),
+    ]
+    graph = helper.make_graph(nodes, "g", [x], [y])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+
+    sim_model, check_ok = onnxsim.simplify(model)
+    assert check_ok
+    # Output must remain a valid, topologically sorted graph.
+    onnx.checker.check_model(sim_model)
+    op_types = [n.op_type for n in sim_model.graph.node]
+    assert op_types.index("SequenceEmpty") < op_types.index("SequenceInsert")
