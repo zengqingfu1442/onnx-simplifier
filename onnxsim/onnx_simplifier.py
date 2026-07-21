@@ -190,7 +190,13 @@ def simplify(
 
     if skip_fuse_bn and skipped_optimizers is not None:
         skipped_optimizers.append("fuse_bn_into_conv")
-    if isinstance(model, str):
+    # Track whether we own the in-memory model. When the caller passes a file
+    # path we load it here, so the resulting ``ModelProto`` is private to this
+    # function and may be mutated freely (e.g. saved as external data without a
+    # defensive copy). When the caller passes their own ``ModelProto`` we must
+    # not mutate it.
+    model_owned = isinstance(model, str)
+    if model_owned:
         model = onnx.load(model)
     if overwrite_input_shapes is None:
         overwrite_input_shapes = {}
@@ -254,8 +260,15 @@ def simplify(
         print("[bold magenta]Simplified model larger than 2GB. Trying to save as external data...[/bold magenta]")
         # large models try to convert through a temporary file
         with tempfile.TemporaryDirectory() as tmpdirname:
+            # ``save_as_external_data=True`` mutates the model in place, moving
+            # each initializer's ``raw_data`` out to the external data file. When
+            # we own the model this both avoids a full ``deepcopy`` (which would
+            # double peak memory for multi-GB models) and frees the in-memory
+            # ``raw_data`` as it is streamed to disk. Only copy when the caller
+            # owns the ``ModelProto`` and must not see it mutated.
+            model_to_save = model if model_owned else copy.deepcopy(model)
             onnx.save(
-                copy.deepcopy(model),
+                model_to_save,
                 os.path.join(tmpdirname, 'model.onnx'),
                 save_as_external_data=True,
             )
