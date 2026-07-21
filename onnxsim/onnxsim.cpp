@@ -442,6 +442,280 @@ onnx::ModelProto _InferShapes(const onnx::ModelProto& model) {
   return result;
 }
 
+// Read an integer initializer (INT32/INT64) into an int64 vector. Returns false
+// if the tensor is not an integer type onnxsim knows how to read.
+bool ReadIntInitializer(const onnx::TensorProto& tp, std::vector<int64_t>& out) {
+  out.clear();
+  const auto dtype = tp.data_type();
+  if (dtype != onnx::TensorProto::INT64 && dtype != onnx::TensorProto::INT32) {
+    return false;
+  }
+  if (tp.has_raw_data()) {
+    // onnxsim assumes little endian everywhere (see TensorProtoToTensor).
+    const std::string& raw = tp.raw_data();
+    if (dtype == onnx::TensorProto::INT64) {
+      const size_t n = raw.size() / sizeof(int64_t);
+      const int64_t* p = reinterpret_cast<const int64_t*>(raw.data());
+      out.assign(p, p + n);
+    } else {
+      const size_t n = raw.size() / sizeof(int32_t);
+      const int32_t* p = reinterpret_cast<const int32_t*>(raw.data());
+      out.assign(p, p + n);
+    }
+  } else if (dtype == onnx::TensorProto::INT64) {
+    out.assign(tp.int64_data().begin(), tp.int64_data().end());
+  } else {
+    out.assign(tp.int32_data().begin(), tp.int32_data().end());
+  }
+  return true;
+}
+
+// A single dimension of a (possibly partially known) tensor shape. `known` is
+// true when the dimension is a fixed integer stored in `value`; otherwise the
+// dimension is symbolic/dynamic.
+struct MaybeDim {
+  bool known;
+  int64_t value;
+};
+
+// Build a lookup from tensor name to its type, gathering shapes from every
+// place a shape can be declared: value_info (populated by shape inference),
+// graph inputs and graph outputs. Pointers reference `model`, so the map must
+// not outlive it and `model` must not be mutated while the map is in use.
+std::unordered_map<std::string, const onnx::TypeProto*> BuildTypeMap(
+    const onnx::ModelProto& model) {
+  std::unordered_map<std::string, const onnx::TypeProto*> type_map;
+  auto add = [&type_map](const onnx::ValueInfoProto& vi) {
+    if (vi.has_type()) {
+      type_map[vi.name()] = &vi.type();
+    }
+  };
+  for (const auto& vi : model.graph().value_info()) add(vi);
+  for (const auto& vi : model.graph().input()) add(vi);
+  for (const auto& vi : model.graph().output()) add(vi);
+  return type_map;
+}
+
+// Fetch the (partially known) shape of `name` from `type_map`. Returns false
+// when the rank is unknown (no shape recorded); returns true with one MaybeDim
+// per dimension otherwise. A rank-0 (scalar) tensor yields an empty `dims`.
+bool GetTensorDims(
+    const std::unordered_map<std::string, const onnx::TypeProto*>& type_map,
+    const std::string& name, std::vector<MaybeDim>& dims) {
+  auto iter = type_map.find(name);
+  if (iter == type_map.end() || !iter->second->has_tensor_type()) {
+    return false;
+  }
+  const auto& tensor_type = iter->second->tensor_type();
+  if (!tensor_type.has_shape()) {
+    // Rank is unknown.
+    return false;
+  }
+  dims.clear();
+  for (const auto& dim : tensor_type.shape().dim()) {
+    if (dim.has_dim_value()) {
+      dims.push_back({true, dim.dim_value()});
+    } else {
+      dims.push_back({false, 0});
+    }
+  }
+  return true;
+}
+
+bool IsDefaultDomain(const std::string& domain) {
+  return domain.empty() || domain == "ai.onnx";
+}
+
+// Build a 1-D INT64 initializer named `name` from `values`.
+onnx::TensorProto MakeInt64Initializer(const std::string& name,
+                                       const std::vector<int64_t>& values) {
+  onnx::TensorProto tp;
+  tp.set_name(name);
+  tp.set_data_type(onnx::TensorProto::INT64);
+  tp.add_dims(static_cast<int64_t>(values.size()));
+  for (const auto& v : values) {
+    tp.add_int64_data(v);
+  }
+  return tp;
+}
+
+// Partial shape evaluation (issue #139).
+//
+// The plain constant folder only folds a node when *all* of its inputs are
+// constant, so a `Shape` op is never folded: its input is an activation. But
+// `Shape` depends solely on the input's shape, and after shape inference some
+// (or all) of those dimensions are statically known even when others stay
+// dynamic. This pass exploits that:
+//
+//   * A `Shape` whose selected dimensions are *all* static becomes a constant
+//     initializer directly.
+//   * A `Gather` reading constant indices from a `Shape` output becomes a
+//     constant initializer whenever every gathered dimension is static -- even
+//     if the surrounding shape has dynamic dimensions. This is the mask-rcnn
+//     pattern from issue #139: `Shape([batch, C, H, W]) -> Gather([1, 2, 3])`
+//     is `[C, H, W]` regardless of the dynamic batch dimension.
+//
+// Downstream ops (Unsqueeze, Concat, ...) then fold through the normal constant
+// folder, and now-dead Shape/Gather nodes are removed by the optimizer.
+onnx::ModelProto _EvalPartialShape(const onnx::ModelProto& input_model) {
+  onnx::ModelProto model;
+  try {
+    model = _InferShapes(input_model);
+  } catch (const std::exception&) {
+    // If shape inference fails we simply have no extra shapes to exploit.
+    return input_model;
+  }
+
+  const auto type_map = BuildTypeMap(model);
+
+  std::unordered_map<std::string, const onnx::TensorProto*> init_map;
+  for (const auto& init : model.graph().initializer()) {
+    init_map[init.name()] = &init;
+  }
+
+  // For every `Shape` node, precompute the (partially known) vector of
+  // dimensions it produces, honoring the optional `start`/`end` attributes
+  // (opset 15+). Keyed by the Shape node's output name.
+  std::unordered_map<std::string, std::vector<MaybeDim>> shape_outputs;
+  for (const auto& node : model.graph().node()) {
+    if (node.op_type() != "Shape" || !IsDefaultDomain(node.domain())) {
+      continue;
+    }
+    if (node.input_size() < 1 || node.output_size() < 1) {
+      continue;
+    }
+    std::vector<MaybeDim> dims;
+    if (!GetTensorDims(type_map, node.input(0), dims)) {
+      continue;
+    }
+    const int64_t rank = static_cast<int64_t>(dims.size());
+    int64_t start = 0;
+    int64_t end = rank;
+    for (const auto& attr : node.attribute()) {
+      if (attr.name() == "start") {
+        start = attr.i();
+      } else if (attr.name() == "end") {
+        end = attr.i();
+      }
+    }
+    if (start < 0) start += rank;
+    if (end < 0) end += rank;
+    start = std::clamp<int64_t>(start, 0, rank);
+    end = std::clamp<int64_t>(end, 0, rank);
+    if (end < start) end = start;
+    shape_outputs[node.output(0)] =
+        std::vector<MaybeDim>(dims.begin() + start, dims.begin() + end);
+  }
+
+  if (shape_outputs.empty()) {
+    return input_model;
+  }
+
+  // Node output(0) names whose producing node is being replaced by an
+  // initializer, plus the initializers to add.
+  std::set<std::string> replaced_outputs;
+  std::vector<onnx::TensorProto> new_initializers;
+
+  // Case 1: a Shape whose every selected dimension is static folds to a
+  // constant.
+  for (const auto& [output, dims] : shape_outputs) {
+    const bool all_known = std::all_of(
+        dims.begin(), dims.end(), [](const MaybeDim& d) { return d.known; });
+    if (!all_known) {
+      continue;
+    }
+    std::vector<int64_t> values;
+    for (const auto& d : dims) {
+      values.push_back(d.value);
+    }
+    new_initializers.push_back(MakeInt64Initializer(output, values));
+    replaced_outputs.insert(output);
+  }
+
+  // Case 2: a Gather with constant indices reading a Shape output folds to a
+  // constant whenever every gathered dimension is static.
+  for (const auto& node : model.graph().node()) {
+    if (node.op_type() != "Gather" || !IsDefaultDomain(node.domain())) {
+      continue;
+    }
+    if (node.input_size() < 2 || node.output_size() < 1) {
+      continue;
+    }
+    // The Shape output is 1-D, so only axis 0 makes sense.
+    int64_t axis = 0;
+    for (const auto& attr : node.attribute()) {
+      if (attr.name() == "axis") {
+        axis = attr.i();
+      }
+    }
+    if (axis != 0) {
+      continue;
+    }
+    auto shape_iter = shape_outputs.find(node.input(0));
+    if (shape_iter == shape_outputs.end()) {
+      continue;
+    }
+    const auto& dims = shape_iter->second;
+    const int64_t length = static_cast<int64_t>(dims.size());
+
+    auto idx_iter = init_map.find(node.input(1));
+    if (idx_iter == init_map.end()) {
+      continue;
+    }
+    const onnx::TensorProto& indices_tp = *idx_iter->second;
+    std::vector<int64_t> indices;
+    if (!ReadIntInitializer(indices_tp, indices)) {
+      continue;
+    }
+
+    bool foldable = true;
+    std::vector<int64_t> values;
+    for (int64_t idx : indices) {
+      const int64_t norm = idx < 0 ? idx + length : idx;
+      if (norm < 0 || norm >= length || !dims[norm].known) {
+        foldable = false;
+        break;
+      }
+      values.push_back(dims[norm].value);
+    }
+    if (!foldable) {
+      continue;
+    }
+
+    // The output has the same shape as the indices tensor (data is 1-D).
+    onnx::TensorProto tp;
+    tp.set_name(node.output(0));
+    tp.set_data_type(onnx::TensorProto::INT64);
+    for (const auto& dim : indices_tp.dims()) {
+      tp.add_dims(dim);
+    }
+    for (const auto& v : values) {
+      tp.add_int64_data(v);
+    }
+    new_initializers.push_back(std::move(tp));
+    replaced_outputs.insert(node.output(0));
+  }
+
+  if (replaced_outputs.empty()) {
+    return input_model;
+  }
+
+  // Drop the replaced nodes (keeping topological order) and add the constants.
+  google::protobuf::RepeatedPtrField<onnx::NodeProto> original_nodes;
+  original_nodes.Swap(model.mutable_graph()->mutable_node());
+  for (auto& node : original_nodes) {
+    const bool replaced = node.output_size() > 0 &&
+                          replaced_outputs.count(node.output(0)) > 0;
+    if (!replaced) {
+      *model.mutable_graph()->add_node() = std::move(node);
+    }
+  }
+  for (auto& init : new_initializers) {
+    *model.mutable_graph()->add_initializer() = std::move(init);
+  }
+  return model;
+}
+
 onnx::ModelProto _FoldConstant(const ModelExecutor& executor,
                                const onnx::ModelProto& model) {
   const auto& tmp = model;
@@ -560,7 +834,9 @@ onnx::ModelProto Simplify(
   std::function<onnx::ModelProto(const onnx::ModelProto&)> FoldConstant;
   if (constant_folding) {
     FoldConstant = [&executor](const onnx::ModelProto& model) {
-      return _FoldConstant(executor, model);
+      // Partial shape evaluation (issue #139) turns Shape/Gather-on-shape into
+      // constants that the ordinary constant folder can then propagate.
+      return _FoldConstant(executor, _EvalPartialShape(model));
     };
   } else {
     FoldConstant = Identity;
