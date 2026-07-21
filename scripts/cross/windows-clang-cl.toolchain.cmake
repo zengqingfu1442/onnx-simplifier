@@ -18,6 +18,12 @@ if(NOT DEFINED XWIN_DIR)
   message(FATAL_ERROR "XWIN_DIR must be set to the directory produced by 'xwin splat'")
 endif()
 
+# CMake re-includes this toolchain file for the compiler-detection try_compile
+# sub-projects, which do NOT inherit arbitrary cache variables. Propagate the
+# ones this toolchain relies on so those sub-builds configure correctly.
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
+  XWIN_DIR CLANG_CL LLD_LINK LLVM_RC LLVM_LIB LLVM_MT)
+
 # --- locate the LLVM tools -----------------------------------------------------
 if(NOT DEFINED CLANG_CL)
   find_program(CLANG_CL NAMES clang-cl clang-cl-18 REQUIRED)
