@@ -161,8 +161,17 @@ fi
 WINPY_INC="${WINPY}/python/include"
 WINPY_LIBDIR="${WINPY}/python/libs"
 PYVER_NODOT="${PYVER//./}"
-WINPY_MODULE_LIB="${WINPY_LIBDIR}/python${PYVER_NODOT}.lib"  # Development.Module
-WINPY_SABI_LIB="${WINPY_LIBDIR}/python3.lib"                 # Development.SABIModule
+WINPY_SABI_LIB="${WINPY_LIBDIR}/python3.lib"  # Development.SABIModule (always: onnx requires it)
+if [[ "${ABI3}" == "1" ]]; then
+  # Limited-API build: use the stable-ABI import lib as the Development.Module
+  # library too, so the linked .pyd depends only on python3.dll -- NOT
+  # pythonXY.dll -- and therefore loads on any CPython at/above the abi3 floor.
+  # (Linking pythonXY.lib here yields a wheel that works on cp3Y but fails to
+  # load on cp3Z with "DLL load failed: python3Y.dll not found".)
+  WINPY_MODULE_LIB="${WINPY_SABI_LIB}"
+else
+  WINPY_MODULE_LIB="${WINPY_LIBDIR}/python${PYVER_NODOT}.lib"
+fi
 for f in "${WINPY_MODULE_LIB}" "${WINPY_SABI_LIB}"; do
   [[ -f "${f}" ]] || { echo "missing ${f}"; ls -la "${WINPY_LIBDIR}"; exit 1; }
 done
