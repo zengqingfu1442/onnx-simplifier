@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
 #
-# Cross-compile an onnxsim Windows (x86_64, MSVC ABI) wheel from Linux.
+# Cross-compile an onnxsim Windows (x86_64) wheel from Linux.
 #
 # This produces a wheel that is binary-compatible with the official python.org
 # CPython on Windows, without ever running a Windows machine.  It exists so the
 # expensive C++ build can run on a cheap Linux runner; the wheel is then handed
 # to a Windows runner purely for `pytest` (see .github/workflows/windows-cross.yml).
 #
+# Two toolchains are supported via BACKEND:
+#   llvm-mingw  clang + lld + a self-contained UCRT/libc++ sysroot (default).
+#               No Microsoft SDK download; statically links the C++ runtime.
+#   clang-cl    clang in MSVC mode against an MSVC CRT + Windows SDK from xwin.
+#
 # High-level stages:
-#   1. Download the MSVC CRT + Windows SDK with `xwin`.
+#   1. Set up the target toolchain (llvm-mingw download, or xwin MSVC SDK).
 #   2. Download the *target* Windows CPython (for its headers + python3.lib).
 #   3. Build a *host* protoc (Linux) so ONNX can run code generation.
 #   4. Cross-build abseil + protobuf for the *target* (Windows) so ONNX can link.
 #   5. Cross-build onnxsim's nanobind extension against all of the above.
 #   6. Pack the resulting .pyd into a correctly tagged wheel.
 #
-# The dependency versions are pinned to whatever the vendored ONNX pins (see the
+# Dependency versions are pinned to whatever the vendored ONNX pins (see the
 # SBOM in third_party/onnx-optimizer/third_party/onnx/sbom.cdx.json); a mismatch
 # between the host protoc and the target libprotobuf would break the build.
 #
 # Required environment:
 #   PYVER          Target CPython version, e.g. "3.12".
-#   ABI3           "1" to build a limited-API (abi3) wheel (only valid for >=3.12),
-#                  "0" for a version-specific wheel.
+#   ABI3           "1" for a limited-API (abi3) wheel (>=3.12 only), else "0".
 # Optional environment:
+#   BACKEND        "llvm-mingw" (default) or "clang-cl".
 #   WORK           Scratch directory (default: $PWD/.cross-build).
-#   PROTOBUF_VER   Override protobuf version (default: read from SBOM).
-#   ABSL_VER       Override abseil version   (default: read from SBOM).
-#   NANOBIND_VER   Override nanobind version (default: read from SBOM).
+#   PROTOBUF_VER / ABSL_VER / NANOBIND_VER   Override versions (default: SBOM).
 #   JOBS           Parallel build jobs (default: nproc).
 #
 set -euo pipefail
@@ -37,12 +40,12 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 : "${PYVER:?set PYVER, e.g. 3.12}"
 : "${ABI3:=0}"
+: "${BACKEND:=llvm-mingw}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${WORK:-${REPO_ROOT}/.cross-build}"
 JOBS="${JOBS:-$(nproc)}"
 ARCH="x86_64"
-TRIPLE="x86_64-pc-windows-msvc"
 
 ONNX_DIR="${REPO_ROOT}/third_party/onnx-optimizer/third_party/onnx"
 SBOM="${ONNX_DIR}/sbom.cdx.json"
@@ -76,7 +79,11 @@ declare -A PBS_PYFULL_MAP=(
 )
 PBS_PYFULL="${PBS_PYFULL:-${PBS_PYFULL_MAP[$PYVER]:?no python-build-standalone pin for $PYVER}}"
 
+# llvm-mingw release (used when BACKEND=llvm-mingw).
+LLVM_MINGW_REL="${LLVM_MINGW_REL:-20250709}"
+
 echo "== onnxsim Windows cross-build =="
+echo "   backend       : ${BACKEND}"
 echo "   target python : ${PYVER} (${PBS_PYFULL}), abi3=${ABI3}"
 echo "   protobuf      : ${PROTOBUF_VER}"
 echo "   abseil-cpp    : ${ABSL_VER}"
@@ -84,13 +91,12 @@ echo "   nanobind      : ${NANOBIND_VER}"
 echo "   work dir      : ${WORK}"
 
 XWIN_DIR="${WORK}/xwin"
+LLVM_MINGW_DIR="${WORK}/llvm-mingw"
 DEPS_HOST="${WORK}/deps-host"     # host (Linux) protobuf install -> protoc
 DEPS_TARGET="${WORK}/deps-target" # target (Windows) absl + protobuf install
 WINPY="${WORK}/winpy"             # target Windows CPython
 DL="${WORK}/dl"
 mkdir -p "${WORK}" "${DL}"
-
-TOOLCHAIN="${REPO_ROOT}/scripts/cross/windows-clang-cl.toolchain.cmake"
 
 fetch() {  # fetch <url> <dest>
   local url="$1" dest="$2"
@@ -102,13 +108,45 @@ fetch() {  # fetch <url> <dest>
 }
 
 # ---------------------------------------------------------------------------
-# 1. MSVC CRT + Windows SDK via xwin
+# 1. Target toolchain
+#
+# TOOLCHAIN_ARGS carries the backend-specific -D flags handed to every target
+# CMake configure (deps in stage 4 and onnxsim in stage 5).
 # ---------------------------------------------------------------------------
-if [[ ! -d "${XWIN_DIR}/crt" ]]; then
-  echo "== [1/6] downloading MSVC CRT + Windows SDK with xwin =="
-  command -v xwin >/dev/null || { echo "xwin not on PATH"; exit 1; }
-  xwin --accept-license --arch x86_64 splat --include-debug-libs --output "${XWIN_DIR}"
-fi
+TOOLCHAIN_ARGS=( -DCMAKE_TOOLCHAIN_FILE="${REPO_ROOT}/scripts/cross/windows-${BACKEND}.toolchain.cmake" )
+
+case "${BACKEND}" in
+  clang-cl)
+    if [[ ! -d "${XWIN_DIR}/crt" ]]; then
+      echo "== [1/6] downloading MSVC CRT + Windows SDK with xwin =="
+      command -v xwin >/dev/null || { echo "xwin not on PATH"; exit 1; }
+      xwin --accept-license --arch x86_64 splat --include-debug-libs --output "${XWIN_DIR}"
+    fi
+    TOOLCHAIN_ARGS+=( -DXWIN_DIR="${XWIN_DIR}" )
+    ;;
+  llvm-mingw)
+    if [[ ! -d "${LLVM_MINGW_DIR}/bin" ]]; then
+      echo "== [1/6] downloading llvm-mingw ${LLVM_MINGW_REL} =="
+      # ucrt = link the Universal CRT, matching modern python.org CPython.
+      mm_url="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_REL}/llvm-mingw-${LLVM_MINGW_REL}-ucrt-ubuntu-22.04-${ARCH}.tar.xz"
+      fetch "${mm_url}" "${DL}/llvm-mingw.tar.xz"
+      mkdir -p "${LLVM_MINGW_DIR}"
+      tar -C "${LLVM_MINGW_DIR}" --strip-components=1 -xf "${DL}/llvm-mingw.tar.xz"
+    fi
+    # Reference the toolchain compilers by absolute path; do NOT put this bin
+    # dir on PATH before the host protoc build in stage 3, because llvm-mingw's
+    # `clang` defaults to a Windows target and would miscompile the host tool.
+    TOOLCHAIN_ARGS+=(
+      -DMINGW_C_COMPILER="${LLVM_MINGW_DIR}/bin/clang"
+      -DMINGW_CXX_COMPILER="${LLVM_MINGW_DIR}/bin/clang++"
+      -DMINGW_RC="${LLVM_MINGW_DIR}/bin/llvm-rc"
+      -DMINGW_AR="${LLVM_MINGW_DIR}/bin/llvm-ar"
+      -DMINGW_RANLIB="${LLVM_MINGW_DIR}/bin/llvm-ranlib"
+    )
+    ;;
+  *)
+    echo "unknown BACKEND '${BACKEND}' (expected llvm-mingw or clang-cl)"; exit 1 ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 2. Target Windows CPython (headers + python3.lib / pythonXY.lib)
@@ -131,7 +169,8 @@ fi
 [[ -f "${WINPY_LIB}" ]] || { echo "missing ${WINPY_LIB}"; ls -la "${WINPY_LIBDIR}"; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 3. Host protoc (Linux) -- ONNX runs this during code generation
+# 3. Host protoc (Linux) -- ONNX runs this during code generation.
+#    Built with the host compiler; the target toolchain is NOT on PATH here.
 # ---------------------------------------------------------------------------
 HOST_PROTOC="${DEPS_HOST}/bin/protoc"
 if [[ ! -x "${HOST_PROTOC}" ]]; then
@@ -158,10 +197,16 @@ if [[ ! -x "${HOST_PROTOC}" ]]; then
 fi
 "${HOST_PROTOC}" --version
 
+# From here on the target toolchain may be on PATH (needed so `-fuse-ld=lld`
+# and llvm-rc/llvm-ar resolve for llvm-mingw target builds).
+if [[ "${BACKEND}" == "llvm-mingw" ]]; then
+  export PATH="${LLVM_MINGW_DIR}/bin:${PATH}"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Target abseil + protobuf (Windows) -- ONNX links these
 # ---------------------------------------------------------------------------
-if [[ ! -f "${DEPS_TARGET}/lib/libprotobuf.lib" && ! -f "${DEPS_TARGET}/lib/protobuf.lib" ]]; then
+if [[ ! -f "${DEPS_TARGET}/.done" ]]; then
   echo "== [4/6] cross-building abseil ${ABSL_VER} + protobuf ${PROTOBUF_VER} for Windows =="
   fetch "https://github.com/abseil/abseil-cpp/releases/download/${ABSL_VER}/abseil-cpp-${ABSL_VER}.tar.gz" "${DL}/absl.tar.gz"
   fetch "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VER}/protobuf-${PROTOBUF_VER}.tar.gz" "${DL}/protobuf.tar.gz"
@@ -173,11 +218,9 @@ if [[ ! -f "${DEPS_TARGET}/lib/libprotobuf.lib" && ! -f "${DEPS_TARGET}/lib/prot
 
   common_target_args=(
     -G Ninja
-    -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}"
-    -DXWIN_DIR="${XWIN_DIR}"
+    "${TOOLCHAIN_ARGS[@]}"
     -DCMAKE_BUILD_TYPE=Release
-    # ONNX links protobuf statically with the static CRT off; match onnxsim CI
-    # which sets ONNX_USE_PROTOBUF_SHARED_LIBS=OFF.
+    # ONNX links protobuf statically (onnxsim CI: ONNX_USE_PROTOBUF_SHARED_LIBS=OFF).
     -DBUILD_SHARED_LIBS=OFF
   )
 
@@ -191,6 +234,7 @@ if [[ ! -f "${DEPS_TARGET}/lib/libprotobuf.lib" && ! -f "${DEPS_TARGET}/lib/prot
     -Dprotobuf_BUILD_PROTOC_BINARIES=OFF \
     -DCMAKE_PREFIX_PATH="${DEPS_TARGET}" -DCMAKE_INSTALL_PREFIX="${DEPS_TARGET}"
   cmake --build "${WORK}/protobuf-tgt-build" --target install -j "${JOBS}"
+  touch "${DEPS_TARGET}/.done"
 fi
 
 # ---------------------------------------------------------------------------
@@ -209,8 +253,7 @@ if [[ "${ABI3}" == "1" ]]; then
 fi
 
 cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-  -DXWIN_DIR="${XWIN_DIR}" \
+  "${TOOLCHAIN_ARGS[@]}" \
   -DCMAKE_BUILD_TYPE=Release \
   -DONNX_BUILD_PYTHON=ON \
   -DONNX_INSTALL=OFF \
