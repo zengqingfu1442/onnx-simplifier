@@ -63,6 +63,12 @@ jobs:
           ABI3: ${{ matrix.abi3 }}
         run: bash scripts/cross/build_windows_wheel.sh
 
+      - name: Check ABI3
+        if: ${{ matrix.abi3 == '1' }}
+        run: |
+          python -m pip install abi3audit
+          abi3audit --strict -v --report ./wheelhouse/*.whl
+
       - uses: actions/upload-artifact@v7
         with:
           name: windows-cross-wheel-${{ matrix.artifact }}
@@ -134,6 +140,9 @@ jobs:
         shell: bash
         working-directory: ${{ runner.temp }}
         run: |
-          pytest -v --durations=10 "${GITHUB_WORKSPACE}/tests"
+          # test_ext allocates a ~2 GiB fp16 tensor; skip it on the Windows
+          # runners (the native windows job deselects it too, via
+          # CIBW_TEST_COMMAND_WINDOWS in build-and-test.yml).
+          pytest -v --durations=10 -k "not test_ext" "${GITHUB_WORKSPACE}/tests"
           onnxsim -h
           onnxsim --list-default-optimizers
