@@ -340,13 +340,38 @@ def simplify(
             not skip_shape_inference,
             tensor_size_threshold,
         )
+        # The serialized original (~1x model) is not needed once the C++
+        # simplifier has consumed it -- the large-model fallback below
+        # re-serializes from ``model`` rather than reusing these bytes. Free it
+        # now so it is not held alive while the simplified result is
+        # deserialized, which would otherwise inflate peak memory for no reason.
+        del model_bytes
         if len(model_opt_bytes) == 0:
             raise ValueError("Simplified model larger than 2GB")
+        # With ``check_n == 0`` the original model is never read again:
+        # ``model_checking.compare`` only touches it inside the ``range(check_n)``
+        # loop, so it merely runs ``onnx.checker.check_model`` on the result.
+        # Release the original before deserializing the result to lower peak
+        # memory. Only do so when we own the model (a caller-provided
+        # ``ModelProto`` is still referenced by the caller, so dropping our
+        # reference would not free anything). This must come *after* the
+        # ``len(model_opt_bytes) == 0`` check above -- that is the ">2GB
+        # optimized model" trigger whose fallback re-simplifies from ``model``.
+        if check_n == 0 and model_owned:
+            model = None
         model_opt = onnx.load_from_string(model_opt_bytes)
         check_ok = model_checking.compare(
             model_opt, model, check_n, test_input_shapes, input_data, custom_lib
         )
     except (EncodeError, ValueError, onnx.onnx_cpp2py_export.checker.ValidationError):
+        if model is None:
+            # We released the original model above because ``check_n == 0`` made
+            # it unnecessary. The large-model fallback re-simplifies from it, so
+            # it cannot run here. This is not the recoverable >2GB case (that is
+            # caught by the ``len(model_opt_bytes) == 0`` check before the model
+            # is freed), so surface the exception directly instead of crashing
+            # on a ``None`` model.
+            raise
         print("[bold magenta]Simplified model larger than 2GB. Trying to save as external data...[/bold magenta]")
         # large models try to convert through a temporary file
         with tempfile.TemporaryDirectory() as tmpdirname:
