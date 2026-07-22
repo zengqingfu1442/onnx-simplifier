@@ -5,7 +5,8 @@
 # This produces a wheel that is binary-compatible with the official python.org
 # CPython on Windows, without ever running a Windows machine.  It exists so the
 # expensive C++ build can run on a cheap Linux runner; the wheel is then handed
-# to a Windows runner purely for `pytest` (see .github/workflows/windows-cross.yml).
+# to a Windows runner purely for `pytest` (see the build_wheels_windows_cross /
+# test_wheels_windows_cross jobs in .github/workflows/build-and-test.yml).
 #
 # Two toolchains are supported via BACKEND:
 #   llvm-mingw  clang + lld + a self-contained UCRT/libc++ sysroot (default).

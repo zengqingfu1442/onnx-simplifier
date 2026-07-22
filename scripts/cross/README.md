@@ -4,11 +4,13 @@ This directory builds an onnxsim **Windows** (x86_64) wheel from a **Linux**
 host, so the expensive C++ compile can run on a cheap Ubuntu runner. The wheel
 is then handed to a Windows runner purely for `pytest`.
 
-`.github/workflows/windows-cross.yml` wires the two halves together:
+`.github/workflows/build-and-test.yml` wires the two halves together (the
+`build_wheels_windows_cross` and `test_wheels_windows_cross` jobs), producing
+the Windows release wheels in place of a native Windows build:
 
 ```
-build-on-linux (ubuntu-24.04)   ->   test-on-windows (windows-2025)
-  llvm-mingw cross-build               pip install the wheel + run tests
+build_wheels_windows_cross (ubuntu-24.04)  ->  test_wheels_windows_cross (windows-2025)
+  llvm-mingw cross-build                         uv install the wheel + run tests
 ```
 
 ## Why not cibuildwheel?
@@ -70,9 +72,10 @@ run is a cold cache, later runs reuse it.
 
 ## Scope / status
 
-* Covers the same Windows CPython versions as the native `build-and-test.yml`:
-  **3.10, 3.11, 3.12, 3.13**. `build-and-test.yml` still builds the release
-  wheels natively — this path runs alongside it.
+* Covers the Windows CPython versions shipped by `build-and-test.yml`:
+  **3.10, 3.11, 3.12, 3.13**. This cross-build **is** the Windows release path —
+  it replaces the native Windows build, and its wheels are published to PyPI by
+  the `upload_pypi` job alongside the natively-built Linux/macOS wheels.
 * **3.12 and 3.13 share one `cp312-abi3` wheel**: a genuine limited-API module
   (nanobind sets `Py_LIMITED_API` and links nuget's `python3.lib`, so the `.pyd`
   imports `python3.dll`). **3.10 and 3.11** are below nanobind's abi3 floor
