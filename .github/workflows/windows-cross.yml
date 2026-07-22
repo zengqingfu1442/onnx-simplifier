@@ -88,8 +88,17 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.py_ver }}
-          cache: 'pip'   # cache pip's download cache (torch et al.) across runs
-          cache-dependency-path: scripts/cross/windows-test-requirements.txt
+
+      # uv installs (and links) much faster than pip -- the cost here is
+      # unpacking torch, not downloading it -- and its global cache (keyed on the
+      # requirements + this workflow, so torch version bumps invalidate it)
+      # caches the packages themselves, torch included.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            scripts/cross/windows-test-requirements.txt
+            .github/workflows/windows-cross.yml
 
       - uses: actions/download-artifact@v8
         with:
@@ -99,13 +108,13 @@ jobs:
       - name: Install cross-built wheel + test deps
         shell: bash
         run: |
-          python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu/
-          python -m pip install -r scripts/cross/windows-test-requirements.txt
+          uv pip install --system torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cpu/
+          uv pip install --system -r scripts/cross/windows-test-requirements.txt
           # Install the cross-built wheel by path (forces our wheel, not PyPI's);
           # its deps (onnx, rich) resolve from PyPI.
           whl=$(ls wheelhouse/onnxsim-*.whl)
           echo "installing ${whl}"
-          python -m pip install "${whl}"
+          uv pip install --system "${whl}"
 
       # Run from a neutral directory: the repo root contains an ./onnxsim source
       # package (without the compiled .pyd) that would otherwise shadow the
