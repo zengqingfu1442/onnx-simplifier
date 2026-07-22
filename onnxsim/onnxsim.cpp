@@ -673,37 +673,82 @@ onnx::ModelProto Optimize(const onnx::ModelProto& model) {
   return onnx::optimization::OptimizeFixed(model, config.optimizer_passes);
 }
 
+// A 128-bit fingerprint of a model, used by FixedPointFn to detect when an
+// iteration stopped changing the model without keeping a second full ModelProto
+// around just for the comparison. Two models with the same fingerprint are
+// treated as equal; the odds of a false match are ~2^-128 per comparison, and a
+// false match would only stop simplification one round early (the model stays
+// valid), never produce an incorrect model.
+struct ModelFingerprint {
+  uint64_t h1;
+  uint64_t h2;
+  bool operator==(const ModelFingerprint& other) const {
+    return h1 == other.h1 && h2 == other.h2;
+  }
+};
+
+ModelFingerprint Fingerprint(const onnx::ModelProto& model) {
+  // ModelProto contains no protobuf ``map<>`` fields, so serialization order is
+  // stable and equal models serialize to identical bytes.
+  const std::string bytes = model.SerializeAsString();
+  // Two independent rolling hashes (FNV-1a and a splitmix-style mix) combined
+  // into a 128-bit value.
+  uint64_t h1 = 1469598103934665603ULL;  // FNV-1a offset basis
+  uint64_t h2 = 0;
+  for (unsigned char c : bytes) {
+    h1 = (h1 ^ c) * 1099511628211ULL;  // FNV-1a prime
+    h2 = (h2 + c) * 0x9E3779B97F4A7C15ULL;
+    h2 ^= h2 >> 29;
+  }
+  h2 ^= bytes.size();
+  return {h1, h2};
+}
+
+// Alternately apply ``f1`` and ``f2`` until the model stops changing (a joint
+// fixed point) or ``max_iters`` alternations elapse. Each application produces a
+// fresh model, so ``model`` is move-assigned in place and only a single
+// ModelProto is held live across the loop; convergence is detected by comparing
+// the fingerprints of consecutive states rather than keeping the previous
+// ModelProto for a ``MessageDifferencer::Equals`` call. This mirrors the
+// original consecutive-pair comparison exactly -- it stops as soon as the last
+// applied function left the model unchanged -- while roughly halving the number
+// of full model copies held at once (which matters because these fixed points
+// nest).
 template <typename T>
 std::function<T(const T&)> FixedPointFn(const std::function<T(const T&)>& f1,
                                         const std::function<T(const T&)>& f2,
                                         size_t max_iters, bool* converged) {
-  return [f1, f2, max_iters, converged](const T& x) {
+  return [f1, f2, max_iters, converged](const T& x) -> T {
     size_t _max_iters = max_iters;
-    T tmp1 = f1(x);
-    T tmp2 = f2(tmp1);
-    T& y1 = tmp1;
-    T& y2 = tmp2;
+    T model = f1(x);
+    ModelFingerprint fp_prev = Fingerprint(model);
+    model = f2(model);
+    ModelFingerprint fp_cur = Fingerprint(model);
     while (_max_iters-- > 0) {
-      if (google::protobuf::util::MessageDifferencer::Equals(y1, y2)) {
+      if (fp_cur == fp_prev) {
         if (converged) {
           *converged = true;
         }
-        return y2;
+        return model;
       }
-      y1 = f1(y2);
-      if (google::protobuf::util::MessageDifferencer::Equals(y1, y2)) {
+      model = f1(model);
+      fp_prev = fp_cur;
+      fp_cur = Fingerprint(model);
+      if (fp_cur == fp_prev) {
         if (converged) {
           *converged = true;
         }
-        return y1;
+        return model;
       }
-      y2 = f2(y1);
+      model = f2(model);
+      fp_prev = fp_cur;
+      fp_cur = Fingerprint(model);
     }
 
     if (converged) {
       *converged = false;
     }
-    return y2;
+    return model;
   };
 }
 
