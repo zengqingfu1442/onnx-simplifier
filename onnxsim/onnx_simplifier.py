@@ -662,10 +662,10 @@ def main():
 
     if args.tensor_size_threshold == DEFAULT_TENSOR_SIZE_THRESHOLDHOLD:
         for node in model.graph.node:
-            if node.op_type in ["Tile", "ConstantOfShape"]:
+            if node.op_type in ["Tile", "ConstantOfShape", "Expand"]:
                 print(
                     Text(
-                        'Your model contains "Tile" ops or/and "ConstantOfShape" ops. Folding these ops can make the simplified model much larger. If it is not expected, please specify "--no-large-tensor" (which will lose some optimization chances)',
+                        'Your model contains "Tile" ops or/and "ConstantOfShape" ops or/and "Expand" ops. Folding these ops can make the simplified model much larger. If it is not expected, please specify "--no-large-tensor" (which will lose some optimization chances)',
                         style="bold magenta",
                     )
                 )
