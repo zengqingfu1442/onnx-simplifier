@@ -162,6 +162,105 @@ def _has_cse_unhashable_tensor(model: onnx.ModelProto) -> bool:
     )
 
 
+def _formal_parameter_tuple(param) -> Tuple:
+    """Marshal an ``onnx.defs.OpSchema.FormalParameter`` for the C++ importer."""
+    return (
+        param.name,
+        param.description,
+        param.type_str,
+        int(param.option),
+        bool(param.is_homogeneous),
+        int(param.min_arity),
+    )
+
+
+def _register_schema_in_onnxsim(schema) -> None:
+    """Register a single ``onnx.defs.OpSchema`` into onnxsim's C++ registry."""
+    inputs = [_formal_parameter_tuple(p) for p in schema.inputs]
+    outputs = [_formal_parameter_tuple(p) for p in schema.outputs]
+
+    attributes = []
+    for attr in schema.attributes.values():
+        default_value = b""
+        # ``default_value`` is an ``AttributeProto``; an UNDEFINED type means the
+        # attribute has no default (it is either required or plainly optional).
+        proto = attr.default_value
+        if proto is not None and proto.type != onnx.AttributeProto.UNDEFINED:
+            default_value = proto.SerializeToString()
+        attributes.append(
+            (attr.name, attr.description, int(attr.type), bool(attr.required), default_value)
+        )
+
+    type_constraints = [
+        (tc.type_param_str, list(tc.allowed_type_strs), tc.description)
+        for tc in schema.type_constraints
+    ]
+
+    C._register_schema(
+        schema.name,
+        schema.domain,
+        int(schema.since_version),
+        schema.doc or "",
+        inputs,
+        outputs,
+        attributes,
+        type_constraints,
+    )
+
+
+def import_onnx_schemas() -> int:
+    """Copy operator schemas from the Python ``onnx`` module into onnxsim.
+
+    onnxsim links its own copy of the ONNX C++ library, so its operator schema
+    registry is completely separate from the one the ``onnx`` Python module uses.
+    A schema a user adds via ``onnx.defs.register_schema`` -- for example to
+    describe a custom/user-defined operator -- is therefore invisible to
+    onnxsim, and simplifying such a model fails ``check_model`` with
+    "No Op registered for <op> ..." (GitHub issue #326).
+
+    This imports every operator schema that onnxsim does not already know about
+    from the ``onnx`` registry into onnxsim's registry, so custom operators pass
+    validation and are preserved through simplification. Standard ONNX operators
+    (already present in onnxsim) are left untouched. It is idempotent and safe to
+    call repeatedly: an operator onnxsim already knows -- including one imported
+    by a previous call -- is skipped.
+
+    Note: the type/shape inference function attached to an ``onnx`` schema is a
+    native pointer inside the ``onnx`` library and cannot be transferred across
+    the library boundary, so imported operators carry no inference function;
+    shape inference flows past them rather than deducing their output shapes.
+
+    :return: the number of schemas imported.
+    """
+    import onnx.defs
+
+    try:
+        schemas = onnx.defs.get_all_schemas_with_history()
+    except Exception:
+        return 0
+
+    imported = 0
+    # Cache onnxsim's knowledge per (op, domain) so the native check runs once
+    # per operator rather than once per registered version.
+    onnxsim_knows: Dict[Tuple[str, str], bool] = {}
+    for schema in schemas:
+        try:
+            key = (schema.name, schema.domain)
+            known = onnxsim_knows.get(key)
+            if known is None:
+                known = C._has_schema(schema.name, schema.domain)
+                onnxsim_knows[key] = known
+            if known:
+                continue
+            _register_schema_in_onnxsim(schema)
+            imported += 1
+        except Exception:
+            # A single unusual schema must never break simplification: skip it
+            # and keep importing the rest.
+            continue
+    return imported
+
+
 def _snapshot_doc_strings(model: onnx.ModelProto) -> dict:
     """Capture the ``doc_string`` fields that the C++ optimizer discards."""
     return {
@@ -246,6 +345,12 @@ def simplify(
         )
         overwrite_input_shapes = input_shapes
         test_input_shapes = input_shapes
+
+    # Bridge operator schemas registered in the Python ``onnx`` module (e.g. via
+    # ``onnx.defs.register_schema`` for a custom operator) into onnxsim's own
+    # separately linked schema registry, so models using custom operators pass
+    # validation instead of failing with "No Op registered for ..." (issue #326).
+    import_onnx_schemas()
 
     if not perform_optimization:
         # None means skip all optimizers
