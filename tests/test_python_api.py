@@ -815,6 +815,68 @@ def test_import_custom_schemas_can_be_disabled():
     assert C._has_schema(op_type, domain)
 
 
+def test_custom_op_shape_inference_via_python_trampoline():
+    # When a custom operator's Python schema carries a type/shape inference
+    # function, onnxsim registers a trampoline that runs that Python function
+    # during its own shape inference (GitHub issue #326). The distinctive output
+    # dimension 99 -- taken from the ``pad`` attribute -- can only appear if the
+    # user's Python inference function actually ran inside onnxsim.
+    op_type = "OnnxsimShapeInferOp"
+    domain = "onnxsim.infer.test"
+    OpSchema = onnx.defs.OpSchema
+    schema = OpSchema(
+        op_type,
+        domain,
+        1,
+        inputs=[OpSchema.FormalParameter("X", "T")],
+        outputs=[OpSchema.FormalParameter("Y", "T")],
+        type_constraints=[("T", ["tensor(float)"], "Constrain to float tensors.")],
+        attributes=[
+            OpSchema.Attribute("pad", OpSchema.AttrType.INT, "extra dim", required=False),
+        ],
+    )
+
+    def infer(ctx):
+        # Output type == input type with one extra trailing dimension whose size
+        # is the ``pad`` attribute.
+        output_type = onnx.TypeProto()
+        output_type.CopyFrom(ctx.get_input_type(0))
+        pad_attr = ctx.get_attribute("pad")
+        pad = pad_attr.i if pad_attr is not None else 0
+        output_type.tensor_type.shape.dim.add().dim_value = pad
+        ctx.set_output_type(0, output_type)
+
+    schema.set_type_and_shape_inference_function(infer)
+    onnx.defs.register_schema(schema)
+    try:
+        x = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, [2, 3])
+        # Declare Y's element type but leave its shape for inference to fill in.
+        y = onnx.helper.make_value_info(
+            "Y", onnx.helper.make_tensor_type_proto(onnx.TensorProto.FLOAT, None)
+        )
+        node = onnx.helper.make_node(op_type, ["X"], ["Y"], domain=domain, pad=99)
+        graph = onnx.helper.make_graph([node], "shape_infer_graph", [x], [y])
+        model = onnx.helper.make_model(
+            graph,
+            opset_imports=[
+                onnx.helper.make_opsetid("", 13),
+                onnx.helper.make_opsetid(domain, 1),
+            ],
+        )
+        model.ir_version = 9
+
+        sim_model, check_ok = onnxsim.simplify(model)
+        assert check_ok
+        out_dims = [
+            d.dim_value for d in sim_model.graph.output[0].type.tensor_type.shape.dim
+        ]
+        assert out_dims == [2, 3, 99], out_dims
+    finally:
+        # Deregister the Python inference function so onnx's global registry does
+        # not segfault while tearing it down at interpreter shutdown.
+        onnx.defs.deregister_schema(op_type, 1, domain)
+
+
 def test_nameless_nodes_get_names():
     # Regression test for GitHub issue #269. Nodes that have no name in the input
     # model (and nodes left nameless by onnx-optimizer passes) must be assigned

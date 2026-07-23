@@ -128,10 +128,12 @@ onnx.defs.register_schema(my_op_schema)
 model_simp, check_ok = onnxsim.simplify(model)
 ```
 
-Note that the type/shape-inference function attached to a schema is native code
-inside the `onnx` library and cannot be transferred across the library
-boundary, so imported operators carry no inference function; shape inference
-flows past them rather than deducing their output shapes.
+If a registered schema also has a type/shape-inference function (set via
+`onnx.defs.OpSchema.set_type_and_shape_inference_function`), onnxsim registers a
+trampoline that calls it back through `onnx.shape_inference.infer_node_outputs`
+during simplification, so the custom operator's output shapes are inferred too.
+Custom operators without an inference function are still imported; shape
+inference simply flows past them.
 
 ## Projects Using ONNX Simplifier
 

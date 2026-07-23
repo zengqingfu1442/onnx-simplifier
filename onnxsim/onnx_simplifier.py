@@ -205,6 +205,7 @@ def _register_schema_in_onnxsim(schema) -> None:
         outputs,
         attributes,
         type_constraints,
+        bool(schema.has_type_and_shape_inference_function),
     )
 
 
@@ -225,10 +226,12 @@ def import_onnx_schemas() -> int:
     call repeatedly: an operator onnxsim already knows -- including one imported
     by a previous call -- is skipped.
 
-    Note: the type/shape inference function attached to an ``onnx`` schema is a
-    native pointer inside the ``onnx`` library and cannot be transferred across
-    the library boundary, so imported operators carry no inference function;
-    shape inference flows past them rather than deducing their output shapes.
+    The type/shape inference function attached to an ``onnx`` schema is native
+    code inside the ``onnx`` library and cannot be transferred directly, so when
+    a schema has one, onnxsim registers a trampoline that calls it back through
+    ``onnx.shape_inference.infer_node_outputs`` during shape inference. Custom
+    operators without an inference function are still imported (shape inference
+    flows past them).
 
     :return: the number of schemas imported.
     """
