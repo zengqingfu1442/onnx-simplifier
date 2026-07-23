@@ -10,12 +10,17 @@ torchvision / timm models. This module adds the missing isolated coverage.
 Every model is built directly with ``onnx.helper`` (no torch dependency) and run
 through ``onnxsim.simplify`` with ``check_n=3`` so onnxsim's own random-input
 equivalence check guards correctness of each rewrite.
+
+The final section holds ``xfail`` tests for optimizations OnnxSlim performs but
+onnxsim currently does not (e.g. ConvTranspose fusion, GELU fusion, no-op Dropout
+removal). They document the gap and will XPASS if onnxsim ever gains the pass.
 """
 import collections
 
 import numpy as np
 import onnx
 import onnxsim
+import pytest
 
 
 def _simplify(model):
@@ -208,3 +213,90 @@ def test_eliminate_common_subexpression():
     _, ops = _simplify(model)
     assert ops["Sqrt"] == 1
     assert ops["Add"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Passes OnnxSlim performs but onnxsim (onnxoptimizer + constant folding) does
+# not. These document the coverage gap: each asserts the *desired* optimization,
+# marked xfail because onnxsim currently leaves the graph unchanged. If a future
+# onnxsim/onnxoptimizer version starts performing one, the test XPASSes and can
+# be promoted to a regular test. strict=False keeps CI green either way.
+# --------------------------------------------------------------------------- #
+@pytest.mark.xfail(
+    reason="onnxsim does not eliminate a no-op Dropout (ratio=0); OnnxSlim does",
+    strict=False)
+def test_eliminate_nop_dropout():
+    inits = [onnx.numpy_helper.from_array(np.array(0.0, dtype=np.float32), "ratio")]
+    nodes = [
+        onnx.helper.make_node("Relu", ["X"], ["a"]),
+        onnx.helper.make_node("Dropout", ["a", "ratio"], ["Y"]),
+    ]
+    model = _model(nodes, [_vi("X", [4, 8])], [_vi("Y", [4, 8])], inits)
+    _, ops = _simplify(model)
+    assert ops["Dropout"] == 0
+    assert ops["Relu"] == 1
+
+
+@pytest.mark.xfail(
+    reason="onnxoptimizer only folds BatchNorm into Conv, not ConvTranspose; "
+           "OnnxSlim fuses ConvTranspose+BN",
+    strict=False)
+def test_fuse_convtranspose_bn():
+    inits = [
+        _f32(np.random.randn(3, 8, 3, 3), "W"),  # ConvTranspose: [Cin, Cout, kH, kW]
+        _f32(np.random.rand(8) + 0.5, "scale"),
+        _f32(np.random.randn(8), "bias"),
+        _f32(np.random.randn(8), "mean"),
+        _f32(np.random.rand(8) + 0.5, "var"),
+    ]
+    nodes = [
+        onnx.helper.make_node("ConvTranspose", ["X", "W"], ["c"], kernel_shape=[3, 3]),
+        onnx.helper.make_node(
+            "BatchNormalization", ["c", "scale", "bias", "mean", "var"], ["Y"]),
+    ]
+    model = _model(nodes, [_vi("X", [1, 3, 8, 8])], [_vi("Y", [1, 8, 10, 10])], inits)
+    _, ops = _simplify(model)
+    assert ops["BatchNormalization"] == 0
+    assert ops["ConvTranspose"] == 1
+
+
+@pytest.mark.xfail(
+    reason="onnxsim has no ConvTranspose+Add bias fusion; OnnxSlim fuses it",
+    strict=False)
+def test_fuse_convtranspose_add():
+    inits = [
+        _f32(np.random.randn(3, 8, 3, 3), "W"),
+        _f32(np.random.randn(1, 8, 1, 1), "bias"),
+    ]
+    nodes = [
+        onnx.helper.make_node("ConvTranspose", ["X", "W"], ["c"], kernel_shape=[3, 3]),
+        onnx.helper.make_node("Add", ["c", "bias"], ["Y"]),
+    ]
+    model = _model(nodes, [_vi("X", [1, 3, 8, 8])], [_vi("Y", [1, 8, 10, 10])], inits)
+    _, ops = _simplify(model)
+    assert ops["Add"] == 0
+    assert ops["ConvTranspose"] == 1
+
+
+@pytest.mark.xfail(
+    reason="onnxsim has no GELU subgraph fusion; OnnxSlim ships a (currently "
+           "disabled) FusionGelu matcher for this exact pattern",
+    strict=False)
+def test_fuse_gelu():
+    # 0.5 * x * (1 + erf(x / sqrt(2))) is the exact-erf GELU formulation.
+    inits = [
+        _f32(np.array([0.5]), "half"),
+        _f32(np.array([1.0]), "one"),
+        _f32(np.array([1.4142135623730951]), "sqrt2"),
+    ]
+    nodes = [
+        onnx.helper.make_node("Div", ["X", "sqrt2"], ["t0"]),
+        onnx.helper.make_node("Erf", ["t0"], ["t1"]),
+        onnx.helper.make_node("Add", ["t1", "one"], ["t2"]),
+        onnx.helper.make_node("Mul", ["X", "t2"], ["t3"]),
+        onnx.helper.make_node("Mul", ["t3", "half"], ["Y"]),
+    ]
+    model = _model(nodes, [_vi("X", [4, 8])], [_vi("Y", [4, 8])], inits)
+    _, ops = _simplify(model)
+    assert ops["Gelu"] == 1
+    assert ops["Erf"] == 0
