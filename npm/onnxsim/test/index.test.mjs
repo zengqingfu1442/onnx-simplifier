@@ -31,9 +31,13 @@ import {
   applyOutlierSuppressionPlus,
   applyLlmInt8,
   applyGptq,
+  applyAdaround,
+  applyQronos,
+  applyTesseraq,
   applyAwq,
   applyQuarot,
   applyQuarotGptq,
+  applyGptvq,
   applySmoothQuant,
   applyStructuredPruning,
   applyWandaPruning,
@@ -223,6 +227,60 @@ try {
     assert.ok(out.length > 0);
   });
 
+  await check("applyAdaround optimizes rounding on synthetic calibration data", async () => {
+    // Same dedicated fixtures as the GPTQ check above; a small iteration
+    // count keeps this check fast, the point being the two-model binding
+    // (including the beta_start/beta_end tuple split) round-trips, not
+    // full convergence.
+    const ort = await import("onnxruntime-web");
+    const floatModel = new Uint8Array(readFileSync(FIXTURE_GPTQ));
+    const quantModel = new Uint8Array(readFileSync(FIXTURE_GPTQ_INT4));
+    const batch = () => ({
+      X: new ort.Tensor("float32", new Float32Array(32).map((_, i) => ((i * 37) % 11) - 5), [1, 32]),
+    });
+    const out = await applyAdaround(floatModel, quantModel, [batch(), batch()], {
+      numIterations: 20,
+    });
+    assert.ok(out instanceof Uint8Array);
+    assert.ok(out.length > 0);
+  });
+
+  await check("applyQronos corrects codes on synthetic calibration data", async () => {
+    // Same dedicated fixtures as the GPTQ check above -- a single-layer
+    // model has no upstream-quantized predecessor, so this also
+    // exercises Qronos's own exact GPTQ reduction, but the point here is
+    // just that the two-model binding (including the per-layer re-probe
+    // against the progressively-corrected working model) round-trips.
+    const ort = await import("onnxruntime-web");
+    const floatModel = new Uint8Array(readFileSync(FIXTURE_GPTQ));
+    const quantModel = new Uint8Array(readFileSync(FIXTURE_GPTQ_INT4));
+    const batch = () => ({
+      X: new ort.Tensor("float32", new Float32Array(32).map((_, i) => ((i * 37) % 11) - 5), [1, 32]),
+    });
+    const out = await applyQronos(floatModel, quantModel, [batch(), batch()], {});
+    assert.ok(out instanceof Uint8Array);
+    assert.ok(out.length > 0);
+  });
+
+  await check("applyTesseraq optimizes rounding on synthetic calibration data", async () => {
+    // Same dedicated fixtures as the GPTQ/Qronos checks above; a small
+    // iteration count keeps this check fast, the point being the
+    // two-model binding (including the beta_start/beta_end tuple split)
+    // round-trips, not full convergence.
+    const ort = await import("onnxruntime-web");
+    const floatModel = new Uint8Array(readFileSync(FIXTURE_GPTQ));
+    const quantModel = new Uint8Array(readFileSync(FIXTURE_GPTQ_INT4));
+    const batch = () => ({
+      X: new ort.Tensor("float32", new Float32Array(32).map((_, i) => ((i * 37) % 11) - 5), [1, 32]),
+    });
+    const out = await applyTesseraq(floatModel, quantModel, [batch(), batch()], {
+      numIterations: 20,
+      parRounds: 2,
+    });
+    assert.ok(out instanceof Uint8Array);
+    assert.ok(out.length > 0);
+  });
+
   await check("applyAwq searches scales on synthetic calibration data", async () => {
     // Same dedicated fixtures as the GPTQ check above.
     const ort = await import("onnxruntime-web");
@@ -247,6 +305,20 @@ try {
       X: new ort.Tensor("float32", new Float32Array(32).map((_, i) => ((i * 37) % 11) - 5), [1, 32]),
     });
     const out = await applyQuarotGptq(floatModel, [batch(), batch()], { seed: 0 });
+    assert.ok(out instanceof Uint8Array);
+    assert.ok(out.length > 0);
+  });
+
+  await check("applyGptvq quantizes weight groups on synthetic calibration data", async () => {
+    // Same dedicated float fixture as the GPTQ/AWQ/QuarotGptq checks
+    // above (K=32) -- like applyQuarotGptq, this pass takes only the
+    // float model: it fits its own codebook and quantizes from scratch.
+    const ort = await import("onnxruntime-web");
+    const floatModel = new Uint8Array(readFileSync(FIXTURE_GPTQ));
+    const batch = () => ({
+      X: new ort.Tensor("float32", new Float32Array(32).map((_, i) => ((i * 37) % 11) - 5), [1, 32]),
+    });
+    const out = await applyGptvq(floatModel, [batch(), batch()], { seed: 0, numCentroids: 16 });
     assert.ok(out instanceof Uint8Array);
     assert.ok(out.length > 0);
   });

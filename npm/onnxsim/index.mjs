@@ -587,6 +587,141 @@ export async function applyGptq(
 }
 
 /**
+ * AdaRound: a rectified-sigmoid relaxation of each weight element's
+ * floor/ceil rounding decision, optimized by a hand-rolled Adam loop to
+ * minimize a layer's own reconstruction error against real calibration
+ * activations. Takes the float model and its
+ * `quantize_weight_only_int4`-quantized counterpart, like `applyGptq`.
+ * Returns the optimized quantized model bytes.
+ */
+export async function applyAdaround(
+  floatModel,
+  quantizedModel,
+  calibration,
+  {
+    numIterations = 300,
+    learningRate = 0.1,
+    regParam = 0.01,
+    warmStart = 0.2,
+    betaStart = 20.0,
+    betaEnd = 2.0,
+  } = {},
+) {
+  const floatBytes = toBytes(floatModel);
+  const quantBytes = toBytes(quantizedModel);
+  const runtime = await getRuntime();
+  const fn = runtime.onnxsim_apply_adaround;
+  if (typeof fn !== "function") {
+    throw new Error("onnxsim: this build has no export 'onnxsim_apply_adaround' (rebuild the wasm module?)");
+  }
+  let result = fn(
+    floatBytes,
+    quantBytes,
+    normalizeCalibrationBatches(calibration),
+    numIterations,
+    learningRate,
+    regParam,
+    warmStart,
+    betaStart,
+    betaEnd,
+  );
+  if (result && typeof result.then === "function") {
+    result = await result;
+  }
+  if (!result) {
+    throw new Error("onnxsim: onnxsim_apply_adaround failed (see stderr output for details)");
+  }
+  return new Uint8Array(result);
+}
+
+/**
+ * Qronos: a sequential, whole-model generalization of `applyGptq` that
+ * additionally accounts for the error already baked into a layer's
+ * activations because upstream layers were quantized first, not just
+ * this layer's own rounding -- processes layers in the float model's
+ * own node order, re-probing the progressively-corrected quantized
+ * model before each subsequent layer. Returns the optimized quantized
+ * model bytes.
+ */
+export async function applyQronos(
+  floatModel,
+  quantizedModel,
+  calibration,
+  { percdamp = 0.01, procBlockSize = 128 } = {},
+) {
+  const floatBytes = toBytes(floatModel);
+  const quantBytes = toBytes(quantizedModel);
+  const runtime = await getRuntime();
+  const fn = runtime.onnxsim_apply_qronos;
+  if (typeof fn !== "function") {
+    throw new Error("onnxsim: this build has no export 'onnxsim_apply_qronos' (rebuild the wasm module?)");
+  }
+  let result = fn(floatBytes, quantBytes, normalizeCalibrationBatches(calibration), percdamp, procBlockSize);
+  if (result && typeof result.then === "function") {
+    result = await result;
+  }
+  if (!result) {
+    throw new Error("onnxsim: onnxsim_apply_qronos failed (see stderr output for details)");
+  }
+  return new Uint8Array(result);
+}
+
+/**
+ * TesseraQ: "Progressive Adaptive Rounding" (PAR) -- an AdaRound-style
+ * rectified-sigmoid rounding relaxation, optimized by a hand-rolled Adam
+ * loop jointly with each weight block's own dequantization scale (in
+ * log-space), with a coarse-to-fine element-by-element hardening
+ * schedule across `parRounds` rounds. Takes the float model and its
+ * `quantize_weight_only_int4`-quantized counterpart, like `applyGptq`.
+ * Returns the optimized quantized model bytes.
+ */
+export async function applyTesseraq(
+  floatModel,
+  quantizedModel,
+  calibration,
+  {
+    numBits = 4,
+    numIterations = 400,
+    parRounds = 4,
+    learningRate = 0.1,
+    scaleLearningRate = 0.01,
+    regParam = 0.01,
+    warmStart = 0.2,
+    betaStart = 20.0,
+    betaEnd = 2.0,
+  } = {},
+) {
+  const floatBytes = toBytes(floatModel);
+  const quantBytes = toBytes(quantizedModel);
+  const runtime = await getRuntime();
+  const fn = runtime.onnxsim_apply_tesseraq;
+  if (typeof fn !== "function") {
+    throw new Error("onnxsim: this build has no export 'onnxsim_apply_tesseraq' (rebuild the wasm module?)");
+  }
+  let result = fn(
+    floatBytes,
+    quantBytes,
+    normalizeCalibrationBatches(calibration),
+    numBits,
+    numIterations,
+    parRounds,
+    learningRate,
+    scaleLearningRate,
+    regParam,
+    warmStart,
+    betaStart,
+    betaEnd,
+  );
+  if (result && typeof result.then === "function") {
+    result = await result;
+  }
+  if (!result) {
+    throw new Error("onnxsim: onnxsim_apply_tesseraq failed (see stderr output for details)");
+  }
+  return new Uint8Array(result);
+}
+
+/**
  * AWQ grid-searched per-channel weight rescaling: takes the float model
  * and its `quantize_weight_only_int4`-quantized counterpart, reuses the
  * quantized model's structure, and rewrites improved layers (INT4
@@ -614,6 +749,33 @@ export async function applyAwq(
     throw new Error("onnxsim: onnxsim_apply_awq failed (see stderr output for details)");
   }
   return new Uint8Array(result);
+}
+
+/**
+ * GPTVQ: a genuine combination of `applyGptq`'s own sequential,
+ * Hessian-compensated correction with a k-means-fit vector codebook --
+ * small groups of consecutive input-channel columns of every matched
+ * MatMul/vanilla-Gemm node's constant 2-D FLOAT32 weight are jointly
+ * quantized against the codebook, then each group's resulting per-column
+ * residual is propagated into every not-yet-quantized column exactly like
+ * `applyGptq`'s own per-column correction. Rewires only the matched
+ * node's weight input (Gather+Reshape[+Transpose]); the node itself,
+ * including any bias, is left otherwise unchanged. Returns the
+ * quantized model bytes.
+ */
+export async function applyGptvq(
+  model,
+  calibration,
+  { seed = 0, vectorDim = 2, numCentroids = 256, numIterations = 10, percdamp = 0.01, skipNames } = {},
+) {
+  return callCalibratedPass("onnxsim_apply_gptvq", model, calibration, [
+    seed,
+    vectorDim,
+    numCentroids,
+    numIterations,
+    percdamp,
+    skipNames,
+  ]);
 }
 
 /**
@@ -693,7 +855,11 @@ export default {
   applyOutlierSuppressionPlus,
   applyLlmInt8,
   applyGptq,
+  applyAdaround,
+  applyQronos,
+  applyTesseraq,
   applyAwq,
   applyQuarotGptq,
+  applyGptvq,
   applySmoothQuant,
 };

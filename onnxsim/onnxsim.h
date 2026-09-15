@@ -18,15 +18,19 @@
 // than including its own home header, sharing a single struct definition
 // (rather than a byte-for-byte duplicate struct body in each header) avoids
 // two independently-edited copies of the same type ever drifting apart.
+#include "adaround_entry.h"
 #include "awq_entry.h"
 #include "gptq_entry.h"
+#include "gptvq_entry.h"
 #include "imatrix_quant_entry.h"
 #include "llm_int8_entry.h"
 #include "outlier_suppression_entry.h"
 #include "outlier_suppression_plus_entry.h"
+#include "qronos_entry.h"
 #include "quarot_gptq_entry.h"
 #include "smoothquant_entry.h"
 #include "structured_pruning_entry.h"
+#include "tesseraq_entry.h"
 
 // RAII owner for a DLManagedTensor: releasing it invokes the tensor's own
 // DLPack deleter exactly once (per the DLPack contract), which frees whatever
@@ -827,6 +831,51 @@ onnx::ModelProto ApplyGgufQ6K(const onnx::ModelProto& model);
 // this one. See awq.py's own module docstring for the technique and
 // awq_entry.h for this port's own scope.
 
+// Qronos: a sequential, whole-model generalization of ApplyGptq that
+// additionally accounts for the error already baked into a layer's
+// activations because upstream layers were quantized first (not just
+// this layer's own rounding error) -- processes layers in the float
+// model's own node order, re-probing the progressively-corrected
+// quantized model before each subsequent layer. C++ port of
+// qronos.py's own apply_qronos, declared in qronos_entry.h (included
+// above) rather than duplicated here, mirroring how ApplyAwq
+// (awq_entry.h, also included above) is documented in its own home
+// header instead of this one. See qronos.py's own module docstring for
+// the technique and qronos_entry.h for this port's own scope (including
+// its accepted numerical scope, shared with ApplyGptq's).
+
+// AdaRound: Nagel et al. 2020's rectified-sigmoid relaxation of each
+// weight element's floor/ceil rounding decision, optimized by a
+// hand-rolled Adam loop to minimize a layer's own reconstruction error
+// against real calibration activations. C++ port of adaround.py's own
+// apply_adaround, declared in adaround_entry.h (included above) rather
+// than duplicated here, mirroring how ApplyQronos (qronos_entry.h, also
+// included above) is documented in its own home header instead of this
+// one. See adaround.py's own module docstring for the technique and
+// adaround_entry.h for this port's own scope -- including its accepted
+// numerical scope (same class as ApplyTesseraq's own, below: an
+// iterative Adam optimization, not a closed-form computation, so
+// cross-language floating-point agreement is measured empirically
+// (tests/test_adaround_cpp.py) rather than assumed).
+
+// TesseraQ: "Progressive Adaptive Rounding" (PAR) -- ApplyAdaRound-style
+// rectified-sigmoid rounding relaxation, but optimized by a hand-rolled
+// Adam loop jointly with each weight block's own dequantization scale
+// (in log-space), with a coarse-to-fine element-by-element hardening
+// schedule across a handful of rounds instead of a single monolithic
+// anneal. C++ port of tesseraq.py's own apply_tesseraq, declared in
+// tesseraq_entry.h (included above) rather than duplicated here,
+// mirroring how ApplyAdaround (adaround_entry.h, also included above)
+// is documented in its own home header instead of this one. See
+// tesseraq.py's own module docstring for the technique and
+// tesseraq_entry.h for this port's own scope -- including its accepted
+// numerical scope, which is NOT the same as every closed-form port's own
+// (ApplyGptq/ApplyAwq/ApplyQronos/ApplyGptvq's correction half): this is
+// an iterative Adam optimization, not a single closed-form computation,
+// so cross-language floating-point agreement is measured empirically
+// (tests/test_tesseraq_cpp.py) rather than assumed from the algorithm's
+// own structure.
+
 // QuaRot+GPTQ (Ashkboos et al., 2024): ApplyQuarot's own per-layer random
 // rotation and data-free activation quantization, but with the weight
 // quantized via ApplyGptq's own Hessian-based column algorithm (evaluated
@@ -838,6 +887,21 @@ onnx::ModelProto ApplyGgufQ6K(const onnx::ModelProto& model);
 // technique and quarot_gptq_entry.h for this port's own scope (including
 // its accepted numerical scope and its own permanent RNG divergence from
 // the Python reference, shared with ApplyQuarot's).
+
+// GPTVQ (Van Baalen et al., 2024): a genuine combination of ApplyGptq's
+// own sequential, Hessian-compensated correction with a k-means-fit
+// vector codebook (like onnxsim.aqlm's own single shared codebook) --
+// small groups of consecutive input-channel columns are jointly
+// quantized against the codebook, then each group's resulting per-column
+// residual is propagated into every not-yet-quantized column exactly
+// like ApplyGptq's own per-column correction -- C++ port of gptvq.py's
+// own quantize_weight_only_gptvq, declared in gptvq_entry.h (included
+// above) rather than duplicated here, mirroring how ApplyQuarotGptq
+// (quarot_gptq_entry.h, also included above) is documented in its own
+// home header instead of this one. See gptvq.py's own module docstring
+// for the technique and gptvq_entry.h for this port's own scope
+// (including its accepted numerical scope and its own permanent RNG
+// divergence from the Python reference for the k-means codebook fit).
 
 // Structured (channel) pruning: removes whole output channels from
 // MatMul/vanilla-Gemm and Conv layers -- real structural pruning (smaller

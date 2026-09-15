@@ -2868,6 +2868,125 @@ em::val onnxsim_apply_gptq(const std::string &float_data,
   }
 }
 
+// AdaRound (Nagel et al., 2020): a rectified-sigmoid relaxation of each
+// weight element's floor/ceil rounding decision, optimized by a
+// hand-rolled Adam loop to minimize a layer's own reconstruction error
+// against real calibration activations. Same two-model calibration-batch
+// contract and executor as onnxsim_apply_gptq's own binding above
+// (candidates are processed independently, so `executor` is invoked
+// once, up front, the same as onnxsim_apply_gptq's own). `beta_start`/
+// `beta_end` are the two ends of apply_adaround's own `beta_range`
+// tuple, split into separate parameters here since this binding layer
+// has no tuple type. See ApplyAdaround in adaround_entry.h, including
+// its own accepted numerical scope note (an iterative optimization, not
+// a closed-form computation).
+em::val onnxsim_apply_adaround(const std::string &float_data,
+                               const std::string &quantized_data,
+                               em::val calibration_batches_val,
+                               int num_iterations, double learning_rate,
+                               double reg_param, double warm_start,
+                               double beta_start, double beta_end) {
+  onnx::ModelProto float_model;
+  if (!float_model.ParseFromArray(float_data.data(), float_data.size())) {
+    std::cerr << "Parse failed (float model)" << std::endl;
+    return em::val::null();
+  }
+  onnx::ModelProto quantized_model;
+  if (!quantized_model.ParseFromArray(quantized_data.data(),
+                                      quantized_data.size())) {
+    std::cerr << "Parse failed (quantized model)" << std::endl;
+    return em::val::null();
+  }
+  try {
+    return SerializeModel(ApplyAdaround(
+        float_model, quantized_model, CalibrationExecutor(),
+        ParseCalibrationBatches(calibration_batches_val), num_iterations,
+        learning_rate, reg_param, warm_start, beta_start, beta_end));
+  } catch (const std::exception &e) {
+    std::cerr << "apply_adaround error: " << e.what() << std::endl;
+    return em::val::null();
+  }
+}
+
+// Qronos: a sequential, whole-model generalization of onnxsim_apply_gptq
+// that additionally accounts for the error already baked into a layer's
+// activations because upstream layers were quantized first, not just
+// this layer's own rounding -- processes layers in the float model's
+// own node order, re-probing the progressively-corrected quantized
+// model before each subsequent layer. Same two-model calibration-batch
+// contract and executor as onnxsim_apply_gptq's own binding above
+// (`percdamp`/`proc_block_size` mean the same thing). See ApplyQronos in
+// qronos_entry.h.
+em::val onnxsim_apply_qronos(const std::string &float_data,
+                             const std::string &quantized_data,
+                             em::val calibration_batches_val, double percdamp,
+                             int proc_block_size) {
+  onnx::ModelProto float_model;
+  if (!float_model.ParseFromArray(float_data.data(), float_data.size())) {
+    std::cerr << "Parse failed (float model)" << std::endl;
+    return em::val::null();
+  }
+  onnx::ModelProto quantized_model;
+  if (!quantized_model.ParseFromArray(quantized_data.data(),
+                                      quantized_data.size())) {
+    std::cerr << "Parse failed (quantized model)" << std::endl;
+    return em::val::null();
+  }
+  try {
+    return SerializeModel(ApplyQronos(
+        float_model, quantized_model, CalibrationExecutor(),
+        ParseCalibrationBatches(calibration_batches_val), percdamp,
+        proc_block_size));
+  } catch (const std::exception &e) {
+    std::cerr << "apply_qronos error: " << e.what() << std::endl;
+    return em::val::null();
+  }
+}
+
+// TesseraQ: "Progressive Adaptive Rounding" (PAR) -- an AdaRound-style
+// rectified-sigmoid rounding relaxation, optimized by a hand-rolled Adam
+// loop jointly with each weight block's own dequantization scale (in
+// log-space), with a coarse-to-fine element-by-element hardening
+// schedule across `par_rounds` rounds. Same two-model calibration-batch
+// contract and executor as onnxsim_apply_gptq's own binding above
+// (candidates are processed independently, so `executor` is invoked
+// once, up front, the same as onnxsim_apply_gptq's own). `beta_start`/
+// `beta_end` are the two ends of apply_tesseraq's own `beta_range`
+// tuple, split into separate parameters here since this binding layer
+// has no tuple type. See ApplyTesseraq in tesseraq_entry.h, including
+// its own accepted numerical scope note (an iterative optimization, not
+// a closed-form computation).
+em::val onnxsim_apply_tesseraq(const std::string &float_data,
+                               const std::string &quantized_data,
+                               em::val calibration_batches_val, int num_bits,
+                               int num_iterations, int par_rounds,
+                               double learning_rate,
+                               double scale_learning_rate, double reg_param,
+                               double warm_start, double beta_start,
+                               double beta_end) {
+  onnx::ModelProto float_model;
+  if (!float_model.ParseFromArray(float_data.data(), float_data.size())) {
+    std::cerr << "Parse failed (float model)" << std::endl;
+    return em::val::null();
+  }
+  onnx::ModelProto quantized_model;
+  if (!quantized_model.ParseFromArray(quantized_data.data(),
+                                      quantized_data.size())) {
+    std::cerr << "Parse failed (quantized model)" << std::endl;
+    return em::val::null();
+  }
+  try {
+    return SerializeModel(ApplyTesseraq(
+        float_model, quantized_model, CalibrationExecutor(),
+        ParseCalibrationBatches(calibration_batches_val), num_bits,
+        num_iterations, par_rounds, learning_rate, scale_learning_rate,
+        reg_param, warm_start, beta_start, beta_end));
+  } catch (const std::exception &e) {
+    std::cerr << "apply_tesseraq error: " << e.what() << std::endl;
+    return em::val::null();
+  }
+}
+
 // AWQ (Lin et al., 2023): grid-searched per-channel weight rescaling for
 // every quantize_weight_only_int4-quantized MatMul/Gemm layer shared (by
 // node output name) between a float model and its quantized counterpart,
@@ -2933,6 +3052,52 @@ em::val onnxsim_apply_quarot_gptq(const std::string &data,
         epsilon));
   } catch (const std::exception &e) {
     std::cerr << "apply_quarot_gptq error: " << e.what() << std::endl;
+    return em::val::null();
+  }
+}
+
+// GPTVQ (Van Baalen et al., 2024): a genuine combination of
+// onnxsim_apply_gptq's own sequential, Hessian-compensated correction
+// with a k-means-fit vector codebook -- small groups of consecutive
+// input-channel columns of every matched MatMul/vanilla-Gemm node's
+// constant 2-D FLOAT32 weight are jointly quantized against the
+// codebook, then each group's resulting per-column residual is
+// propagated into every not-yet-quantized column exactly like
+// onnxsim_apply_gptq's own per-column correction. Rewires only the
+// matched node's weight input (Gather+Reshape[+Transpose]); the node
+// itself, including any bias, is left otherwise unchanged. Same
+// calibration-batch contract and executor as every other
+// calibration-driven binding above, and the same `skip_names` (JS
+// array of strings, possibly undefined/null) crossing convention as
+// onnxsim_apply_imatrix_quantization's own binding. `seed` arrives as a
+// JS number (double) and is narrowed to the uint64 it feeds, the same
+// way onnxsim_apply_quarot_gptq's own does. See ApplyGptvq in
+// gptvq_entry.h.
+em::val onnxsim_apply_gptvq(const std::string &data,
+                             em::val calibration_batches_val, double seed,
+                             int vector_dim, int num_centroids,
+                             int num_iterations, double percdamp,
+                             em::val skip_names_val) {
+  onnx::ModelProto xmodel;
+  if (!xmodel.ParseFromArray(data.data(), data.size())) {
+    std::cerr << "Parse failed" << std::endl;
+    return em::val::null();
+  }
+  try {
+    std::unordered_set<std::string> skip_names;
+    if (!skip_names_val.isUndefined() && !skip_names_val.isNull()) {
+      for (const std::string &name :
+           em::vecFromJSArray<std::string>(skip_names_val)) {
+        skip_names.insert(name);
+      }
+    }
+    return SerializeModel(ApplyGptvq(
+        xmodel, CalibrationExecutor(),
+        ParseCalibrationBatches(calibration_batches_val),
+        static_cast<uint64_t>(seed), vector_dim, num_centroids,
+        num_iterations, percdamp, skip_names));
+  } catch (const std::exception &e) {
+    std::cerr << "apply_gptvq error: " << e.what() << std::endl;
     return em::val::null();
   }
 }
@@ -3088,8 +3253,12 @@ EMSCRIPTEN_BINDINGS(module) {
            &onnxsim_apply_outlier_suppression_plus);
   function("onnxsim_apply_llm_int8", &onnxsim_apply_llm_int8);
   function("onnxsim_apply_gptq", &onnxsim_apply_gptq);
+  function("onnxsim_apply_adaround", &onnxsim_apply_adaround);
+  function("onnxsim_apply_qronos", &onnxsim_apply_qronos);
+  function("onnxsim_apply_tesseraq", &onnxsim_apply_tesseraq);
   function("onnxsim_apply_awq", &onnxsim_apply_awq);
   function("onnxsim_apply_quarot_gptq", &onnxsim_apply_quarot_gptq);
+  function("onnxsim_apply_gptvq", &onnxsim_apply_gptvq);
   function("onnxsim_apply_smoothquant", &onnxsim_apply_smoothquant);
 
   // Block-wise QAT: build one block's step graph, run the loop in JS on

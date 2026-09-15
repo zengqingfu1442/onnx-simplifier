@@ -1042,6 +1042,129 @@ NB_MODULE(onnxsim_cpp2py_export, m) {
       "executor"_a, "float_model_bytes"_a, "quantized_model_bytes"_a,
       "calibration_data"_a, "num_alpha_steps"_a = 20);
 
+  // AdaRound (Nagel et al., 2020): Nagel et al.'s rectified-sigmoid
+  // relaxation of each weight element's floor/ceil rounding decision,
+  // optimized by a hand-rolled Adam loop to minimize a layer's own
+  // reconstruction error against real calibration activations. Same
+  // two-model executor-as-first-argument shape as apply_gptq's own
+  // binding above (candidates are processed independently, so `executor`
+  // is invoked once, up front, the same as apply_gptq's own);
+  // `calibration_data` (List[Dict[str, onnx.TensorProto]]) is keyed to
+  // the float model's own graph inputs. `beta_start`/`beta_end` are the
+  // two ends of apply_adaround's own `beta_range` tuple, split into
+  // separate parameters here since this binding layer has no tuple type.
+  // See ApplyAdaround in adaround_entry.h for the full scope (including
+  // its own accepted numerical scope -- an iterative optimization, not a
+  // closed-form computation) and onnxsim/adaround.py for the technique
+  // this ports.
+  m.def(
+      "apply_adaround",
+      [](std::shared_ptr<PyModelExecutor> executor,
+         const py::bytes& float_model_bytes, const py::bytes& quantized_bytes,
+         std::vector<std::unordered_map<std::string, onnx::TensorProto>>
+             calibration_data,
+         int64_t num_iterations, double learning_rate, double reg_param,
+         double warm_start, double beta_start, double beta_end) -> py::bytes {
+        InitEnv();
+        ONNX_NAMESPACE::ModelProto float_model;
+        ParseProtoFromBytes(&float_model, float_model_bytes.c_str(),
+                            float_model_bytes.size());
+        ONNX_NAMESPACE::ModelProto quantized_model;
+        ParseProtoFromBytes(&quantized_model, quantized_bytes.c_str(),
+                            quantized_bytes.size());
+        const auto result =
+            ApplyAdaround(float_model, quantized_model, *executor,
+                          calibration_data, num_iterations, learning_rate,
+                          reg_param, warm_start, beta_start, beta_end);
+        std::string out;
+        result.SerializeToString(&out);
+        return py::bytes(out.data(), out.size());
+      },
+      "executor"_a, "float_model_bytes"_a, "quantized_model_bytes"_a,
+      "calibration_data"_a, "num_iterations"_a = 300, "learning_rate"_a = 0.1,
+      "reg_param"_a = 0.01, "warm_start"_a = 0.2, "beta_start"_a = 20.0,
+      "beta_end"_a = 2.0);
+
+  // Qronos: a sequential, whole-model generalization of apply_gptq that
+  // additionally accounts for the error already baked into a layer's
+  // activations because upstream layers were quantized first, not just
+  // this layer's own rounding -- processes layers in the float model's
+  // own node order, re-probing the progressively-corrected quantized
+  // model before each subsequent layer (so `executor` is invoked once
+  // per matched layer here, not once up front for all of them like every
+  // other calibration-driven binding above). Same two-model
+  // executor-as-first-argument shape as apply_gptq's own binding above;
+  // `calibration_data` (List[Dict[str, onnx.TensorProto]]) is keyed to
+  // the float model's own graph inputs. See ApplyQronos in
+  // qronos_entry.h for the full scope and onnxsim/qronos.py for the
+  // technique this ports.
+  m.def(
+      "apply_qronos",
+      [](std::shared_ptr<PyModelExecutor> executor,
+         const py::bytes& float_model_bytes, const py::bytes& quantized_bytes,
+         std::vector<std::unordered_map<std::string, onnx::TensorProto>>
+             calibration_data,
+         double percdamp, int64_t proc_block_size) -> py::bytes {
+        InitEnv();
+        ONNX_NAMESPACE::ModelProto float_model;
+        ParseProtoFromBytes(&float_model, float_model_bytes.c_str(),
+                            float_model_bytes.size());
+        ONNX_NAMESPACE::ModelProto quantized_model;
+        ParseProtoFromBytes(&quantized_model, quantized_bytes.c_str(),
+                            quantized_bytes.size());
+        const auto result =
+            ApplyQronos(float_model, quantized_model, *executor,
+                        calibration_data, percdamp, proc_block_size);
+        std::string out;
+        result.SerializeToString(&out);
+        return py::bytes(out.data(), out.size());
+      },
+      "executor"_a, "float_model_bytes"_a, "quantized_model_bytes"_a,
+      "calibration_data"_a, "percdamp"_a = 0.01, "proc_block_size"_a = 128);
+
+  // TesseraQ: "Progressive Adaptive Rounding" (PAR) -- an AdaRound-style
+  // rectified-sigmoid rounding relaxation, optimized by a hand-rolled
+  // Adam loop jointly with each weight block's own dequantization scale
+  // (in log-space), with a coarse-to-fine element-by-element hardening
+  // schedule across `par_rounds` rounds. Same two-model
+  // executor-as-first-argument shape as apply_gptq's own binding above
+  // (candidates are processed independently, so `executor` is invoked
+  // once, up front, the same as apply_gptq's own); `calibration_data`
+  // (List[Dict[str, onnx.TensorProto]]) is keyed to the float model's own
+  // graph inputs. See ApplyTesseraq in tesseraq_entry.h for the full
+  // scope (including its own accepted numerical scope -- an iterative
+  // optimization, not a closed-form computation) and
+  // onnxsim/tesseraq.py for the technique this ports.
+  m.def(
+      "apply_tesseraq",
+      [](std::shared_ptr<PyModelExecutor> executor,
+         const py::bytes& float_model_bytes, const py::bytes& quantized_bytes,
+         std::vector<std::unordered_map<std::string, onnx::TensorProto>>
+             calibration_data,
+         int64_t num_bits, int64_t num_iterations, int64_t par_rounds,
+         double learning_rate, double scale_learning_rate, double reg_param,
+         double warm_start, double beta_start, double beta_end) -> py::bytes {
+        InitEnv();
+        ONNX_NAMESPACE::ModelProto float_model;
+        ParseProtoFromBytes(&float_model, float_model_bytes.c_str(),
+                            float_model_bytes.size());
+        ONNX_NAMESPACE::ModelProto quantized_model;
+        ParseProtoFromBytes(&quantized_model, quantized_bytes.c_str(),
+                            quantized_bytes.size());
+        const auto result = ApplyTesseraq(
+            float_model, quantized_model, *executor, calibration_data, num_bits,
+            num_iterations, par_rounds, learning_rate, scale_learning_rate,
+            reg_param, warm_start, beta_start, beta_end);
+        std::string out;
+        result.SerializeToString(&out);
+        return py::bytes(out.data(), out.size());
+      },
+      "executor"_a, "float_model_bytes"_a, "quantized_model_bytes"_a,
+      "calibration_data"_a, "num_bits"_a = 4, "num_iterations"_a = 400,
+      "par_rounds"_a = 4, "learning_rate"_a = 0.1,
+      "scale_learning_rate"_a = 0.01, "reg_param"_a = 0.01,
+      "warm_start"_a = 0.2, "beta_start"_a = 20.0, "beta_end"_a = 2.0);
+
   // QuaRot+GPTQ (Ashkboos et al., 2024): the real QuaRot paper's optional,
   // tighter weight quantizer -- rotates every matched MatMul/vanilla-Gemm
   // node's activation by a fresh per-layer random orthogonal matrix and
@@ -1076,6 +1199,49 @@ NB_MODULE(onnxsim_cpp2py_export, m) {
       "executor"_a, "model_bytes"_a, "calibration_data"_a, "seed"_a = 0,
       "block_size"_a = 32, "percdamp"_a = 0.01, "proc_block_size"_a = 128,
       "epsilon"_a = 1e-12);
+
+  // GPTVQ (Van Baalen et al., 2024): a genuine combination of
+  // apply_gptq's own sequential, Hessian-compensated correction with a
+  // k-means-fit vector codebook -- small groups of consecutive
+  // input-channel columns of every matched MatMul/vanilla-Gemm node's
+  // constant 2-D FLOAT32 weight are jointly quantized against the
+  // codebook, then each group's resulting per-column residual is
+  // propagated into every not-yet-quantized column exactly like
+  // apply_gptq's own per-column correction. Rewires only the matched
+  // node's weight input (Gather+Reshape[+Transpose]); the node itself,
+  // including any bias, is left otherwise unchanged. Same
+  // executor-as-first-argument, `calibration_data` (List[Dict[str,
+  // onnx.TensorProto]]) crossing convention, and `skip_names` (List[str])
+  // crossing convention as apply_imatrix_quantization's own binding
+  // above. See ApplyGptvq in gptvq_entry.h for the full scope (including
+  // its own permanent RNG divergence from the Python reference for the
+  // k-means codebook fit) and onnxsim/gptvq.py for the technique this
+  // ports.
+  m.def(
+      "apply_gptvq",
+      [](std::shared_ptr<PyModelExecutor> executor,
+         const py::bytes& model_proto_bytes,
+         std::vector<std::unordered_map<std::string, onnx::TensorProto>>
+             calibration_data,
+         uint64_t seed, int64_t vector_dim, int64_t num_centroids,
+         int64_t num_iterations, double percdamp,
+         const std::vector<std::string>& skip_names) -> py::bytes {
+        InitEnv();
+        ONNX_NAMESPACE::ModelProto model;
+        ParseProtoFromBytes(&model, model_proto_bytes.c_str(),
+                            model_proto_bytes.size());
+        const std::unordered_set<std::string> skip_names_set(skip_names.begin(),
+                                                             skip_names.end());
+        const auto result =
+            ApplyGptvq(model, *executor, calibration_data, seed, vector_dim,
+                       num_centroids, num_iterations, percdamp, skip_names_set);
+        std::string out;
+        result.SerializeToString(&out);
+        return py::bytes(out.data(), out.size());
+      },
+      "executor"_a, "model_bytes"_a, "calibration_data"_a, "seed"_a = 0,
+      "vector_dim"_a = 2, "num_centroids"_a = 256, "num_iterations"_a = 10,
+      "percdamp"_a = 0.01, "skip_names"_a = std::vector<std::string>());
 
   // SmoothQuant migration (Xiao et al., 2022): rescales every matched
   // MatMul/vanilla-Gemm node's constant 2-D FLOAT32 weight columns by the

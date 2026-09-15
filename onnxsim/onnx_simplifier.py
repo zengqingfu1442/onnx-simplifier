@@ -2525,6 +2525,305 @@ def apply_gptq_cpp(
     )
 
 
+def apply_adaround_cpp(
+    float_model: Union[str, onnx.ModelProto],
+    quantized_model: Union[str, onnx.ModelProto],
+    calibration_data: Optional[Sequence[Tensors]] = None,
+    num_samples: int = 8,
+    seed: int = 0,
+    num_iterations: int = 300,
+    learning_rate: float = 0.1,
+    reg_param: float = 0.01,
+    warm_start: float = 0.2,
+    beta_range: Tuple[float, float] = (20.0, 2.0),
+    providers: Optional[Sequence[backend.Provider]] = None,
+) -> onnx.ModelProto:
+    """
+    C++-backed port of :func:`onnxsim.apply_adaround`: Nagel et al.
+    (2020)'s AdaRound -- a rectified-sigmoid relaxation of each weight
+    element's floor/ceil rounding decision, optimized by a hand-rolled
+    Adam loop to minimize a layer's own reconstruction error against real
+    calibration activations, rather than round-to-nearest's
+    per-element-independent choice -- see ``onnxsim/adaround.py``'s own
+    module docstring for the full technique.
+
+    Same real calibration machinery as :func:`onnxsim.apply_gptq_cpp` --
+    a live :class:`onnxsim.onnx_simplifier.PyModelExecutor`-backed
+    :func:`onnxsim.onnx_simplifier._get_model_executor` executor actually
+    runs ``calibration_data`` through the float model in C++ (see
+    ``ApplyAdaround`` in ``adaround_entry.h`` for the full scope).
+
+    Same accepted-numerical-scope class as
+    :func:`onnxsim.apply_tesseraq_cpp` (not every other calibration-driven
+    ``*_cpp`` port in this codebase, all either closed-form or
+    closed-form-apart-from-RNG): this is an iterative Adam optimization,
+    so cross-language floating-point agreement is measured empirically
+    (see tests/test_adaround_cpp.py) rather than assumed, and this
+    function is not aliased from :func:`onnxsim.apply_adaround`.
+
+    :param float_model: the original (unquantized) onnx ModelProto or file
+            path
+    :param quantized_model: a quantized version of ``float_model`` (onnx
+            ModelProto or file path), produced by
+            :func:`onnxsim.quantize_weight_only_int4`
+    :param calibration_data: representative input batches to optimize the
+            rounding on -- see :func:`onnxsim.generate_random_calibration_data`
+            (the default when omitted)
+    :param num_samples: random batches to generate when
+            ``calibration_data`` is omitted
+    :param seed: seed for the random calibration data (ignored if
+            ``calibration_data`` is supplied) -- this port has no RNG of
+            its own, so ``seed`` only ever affects which calibration
+            batches get generated
+    :param num_iterations: Adam steps to run per layer
+    :param learning_rate: Adam learning rate for the per-element rounding
+            relaxation
+    :param reg_param: weight of the regularization term that pulls each
+            element's relaxation toward a hard 0/1 (floor/ceil) decision
+    :param warm_start: fraction of ``num_iterations`` (from the start) run
+            with the regularization term disabled
+    :param beta_range: ``(beta_start, beta_end)`` for the regularization
+            term's exponent, linearly annealed after ``warm_start``
+    :param providers: onnxruntime execution providers to run ``float_model``
+            on when capturing calibration activations
+    :returns: ``quantized_model`` with every matched layer's INT4 weight
+            initializer rewritten to its AdaRound-optimized codes.
+    """
+    if isinstance(float_model, str):
+        float_model = onnx.load(float_model, load_external_data=False)
+    if isinstance(quantized_model, str):
+        quantized_model = onnx.load(quantized_model, load_external_data=False)
+    if calibration_data is None:
+        calibration_data = generate_random_calibration_data(
+            float_model, num_samples=num_samples, seed=seed
+        )
+    # Same {input_name: TensorProto}-per-batch crossing convention as
+    # apply_gptq_cpp -- see that function's own comment.
+    calibration_data_pb = [
+        {
+            name: onnx.numpy_helper.from_array(np.asarray(arr), name)
+            for name, arr in batch.items()
+        }
+        for batch in calibration_data
+    ]
+    beta_start, beta_end = beta_range
+    return onnx.load_from_string(
+        C.apply_adaround(
+            _get_model_executor(providers),
+            float_model.SerializeToString(),
+            quantized_model.SerializeToString(),
+            calibration_data_pb,
+            num_iterations,
+            learning_rate,
+            reg_param,
+            warm_start,
+            beta_start,
+            beta_end,
+        )
+    )
+
+
+def apply_qronos_cpp(
+    float_model: Union[str, onnx.ModelProto],
+    quantized_model: Union[str, onnx.ModelProto],
+    calibration_data: Optional[Sequence[Tensors]] = None,
+    num_samples: int = 8,
+    seed: int = 0,
+    percdamp: float = 0.01,
+    proc_block_size: int = 128,
+    providers: Optional[Sequence[backend.Provider]] = None,
+) -> onnx.ModelProto:
+    """
+    C++-backed port of :func:`onnxsim.apply_qronos`: a sequential,
+    whole-model generalization of GPTQ that additionally accounts for the
+    error already baked into a layer's activations because upstream
+    layers were quantized first, not just this layer's own rounding --
+    see ``onnxsim/qronos.py``'s own module docstring for the full
+    technique and how it reduces exactly to
+    :func:`onnxsim.apply_gptq_cpp` when a layer has no already-quantized
+    upstream layer feeding it.
+
+    Same real calibration machinery as :func:`onnxsim.apply_gptq_cpp` --
+    a live :class:`onnxsim.onnx_simplifier.PyModelExecutor`-backed
+    :func:`onnxsim.onnx_simplifier._get_model_executor` executor actually
+    runs ``calibration_data`` through the model in C++ (see
+    ``ApplyQronos`` in ``qronos_entry.h`` for the full scope, including
+    its accepted numerical scope, shared with :func:`onnxsim.apply_gptq_cpp`'s
+    own). Unlike every other calibration-driven ``*_cpp`` port in this
+    codebase, the executor is invoked once per matched layer (not once up
+    front for all of them): each layer's correction re-probes the
+    progressively-corrected quantized model, processing layers in
+    ``float_model``'s own node order.
+
+    :param float_model: the original (unquantized) onnx ModelProto or file
+            path
+    :param quantized_model: a quantized version of ``float_model`` (onnx
+            ModelProto or file path), produced by
+            :func:`onnxsim.quantize_weight_only_int4`
+    :param calibration_data: representative input batches to compute each
+            layer's target/Hessian from -- see
+            :func:`onnxsim.generate_random_calibration_data` (the default
+            when omitted)
+    :param num_samples: random batches to generate when
+            ``calibration_data`` is omitted
+    :param seed: seed for the random calibration data (ignored if
+            ``calibration_data`` is supplied)
+    :param percdamp: Hessian damping factor (fraction of the mean diagonal
+            added before inversion)
+    :param proc_block_size: GPTQ's own column-processing block size (not
+            the quantization scale's own block size, reused unchanged)
+    :param providers: onnxruntime execution providers to run ``float_model``
+            on when capturing calibration activations
+    :returns: ``quantized_model`` with every matched layer's INT4 weight
+            initializer rewritten to its Qronos-corrected codes (same
+            shape, dtype, and scale -- only which integer each element
+            rounds to changes).
+    """
+    if isinstance(float_model, str):
+        float_model = onnx.load(float_model, load_external_data=False)
+    if isinstance(quantized_model, str):
+        quantized_model = onnx.load(quantized_model, load_external_data=False)
+    if calibration_data is None:
+        calibration_data = generate_random_calibration_data(
+            float_model, num_samples=num_samples, seed=seed
+        )
+    # Same {input_name: TensorProto}-per-batch crossing convention as
+    # apply_gptq_cpp -- see that function's own comment.
+    calibration_data_pb = [
+        {
+            name: onnx.numpy_helper.from_array(np.asarray(arr), name)
+            for name, arr in batch.items()
+        }
+        for batch in calibration_data
+    ]
+    return onnx.load_from_string(
+        C.apply_qronos(
+            _get_model_executor(providers),
+            float_model.SerializeToString(),
+            quantized_model.SerializeToString(),
+            calibration_data_pb,
+            percdamp,
+            proc_block_size,
+        )
+    )
+
+
+def apply_tesseraq_cpp(
+    float_model: Union[str, onnx.ModelProto],
+    quantized_model: Union[str, onnx.ModelProto],
+    calibration_data: Optional[Sequence[Tensors]] = None,
+    num_samples: int = 8,
+    seed: int = 0,
+    num_bits: int = 4,
+    num_iterations: int = 400,
+    par_rounds: int = 4,
+    learning_rate: float = 0.1,
+    scale_learning_rate: float = 0.01,
+    reg_param: float = 0.01,
+    warm_start: float = 0.2,
+    beta_range: Tuple[float, float] = (20.0, 2.0),
+    providers: Optional[Sequence[backend.Provider]] = None,
+) -> onnx.ModelProto:
+    """
+    C++-backed port of :func:`onnxsim.apply_tesseraq`: TesseraQ's own
+    "Progressive Adaptive Rounding" (PAR) -- an AdaRound-style
+    rectified-sigmoid rounding relaxation, optimized by a hand-rolled Adam
+    loop jointly with each weight block's own dequantization scale (in
+    log-space), with a coarse-to-fine element-by-element hardening
+    schedule across ``par_rounds`` rounds instead of a single monolithic
+    anneal -- see ``onnxsim/tesseraq.py``'s own module docstring for the
+    full technique.
+
+    Same real calibration machinery as :func:`onnxsim.apply_gptq_cpp` --
+    a live :class:`onnxsim.onnx_simplifier.PyModelExecutor`-backed
+    :func:`onnxsim.onnx_simplifier._get_model_executor` executor actually
+    runs ``calibration_data`` through the float model in C++ (see
+    ``ApplyTesseraq`` in ``tesseraq_entry.h`` for the full scope).
+
+    Unlike every other calibration-driven ``*_cpp`` port in this codebase
+    (all either closed-form or, for :func:`onnxsim.apply_quarot_gptq_cpp`/
+    :func:`onnxsim.apply_gptvq_cpp`, closed-form apart from an
+    independently-seeded RNG), this is an iterative Adam optimization: see
+    ``tesseraq_entry.h``'s own accepted numerical scope note for what that
+    means for cross-language floating-point agreement, and
+    tests/test_tesseraq_cpp.py for how closely this tracks the pure-Python
+    reference in practice.
+
+    :param float_model: the original (unquantized) onnx ModelProto or file
+            path
+    :param quantized_model: a quantized version of ``float_model`` (onnx
+            ModelProto or file path), produced by
+            :func:`onnxsim.quantize_weight_only_int4`
+    :param calibration_data: representative input batches to optimize the
+            reconstruction against -- see
+            :func:`onnxsim.generate_random_calibration_data` (the default
+            when omitted)
+    :param num_samples: random batches to generate when
+            ``calibration_data`` is omitted
+    :param seed: seed for the random calibration data (ignored if
+            ``calibration_data`` is supplied) -- this port has no RNG of
+            its own (unlike :func:`onnxsim.apply_quarot_gptq_cpp`'s/
+            :func:`onnxsim.apply_gptvq_cpp`'s own), so ``seed`` only ever
+            affects which calibration batches get generated
+    :param num_bits: effective signed bit width PAR rounds each element
+            into (2..4) -- see :func:`onnxsim.apply_tesseraq`'s own
+            parameter of the same name
+    :param num_iterations: total Adam steps to run per layer, split evenly
+            across ``par_rounds``
+    :param par_rounds: number of Progressive Adaptive Rounding rounds
+    :param learning_rate: Adam learning rate for the per-element rounding
+            relaxation
+    :param scale_learning_rate: Adam learning rate for each weight block's
+            dequantization scale
+    :param reg_param: weight of the regularization term pulling each
+            still-soft element toward a hard 0/1 decision
+    :param warm_start: fraction of the total iteration budget run with the
+            regularization term disabled
+    :param beta_range: ``(beta_start, beta_end)`` for the regularization
+            term's exponent, linearly annealed after ``warm_start``
+    :param providers: onnxruntime execution providers to run ``float_model``
+            on when capturing calibration activations
+    :returns: ``quantized_model`` with every matched layer's INT4 weight
+            codes and per-block scale initializers rewritten to their
+            PAR-optimized values.
+    """
+    if isinstance(float_model, str):
+        float_model = onnx.load(float_model, load_external_data=False)
+    if isinstance(quantized_model, str):
+        quantized_model = onnx.load(quantized_model, load_external_data=False)
+    if calibration_data is None:
+        calibration_data = generate_random_calibration_data(
+            float_model, num_samples=num_samples, seed=seed
+        )
+    # Same {input_name: TensorProto}-per-batch crossing convention as
+    # apply_gptq_cpp -- see that function's own comment.
+    calibration_data_pb = [
+        {
+            name: onnx.numpy_helper.from_array(np.asarray(arr), name)
+            for name, arr in batch.items()
+        }
+        for batch in calibration_data
+    ]
+    beta_start, beta_end = beta_range
+    return onnx.load_from_string(
+        C.apply_tesseraq(
+            _get_model_executor(providers),
+            float_model.SerializeToString(),
+            quantized_model.SerializeToString(),
+            calibration_data_pb,
+            num_bits,
+            num_iterations,
+            par_rounds,
+            learning_rate,
+            scale_learning_rate,
+            reg_param,
+            warm_start,
+            beta_start,
+            beta_end,
+        )
+    )
+
+
 def apply_awq_cpp(
     float_model: Union[str, onnx.ModelProto],
     quantized_model: Union[str, onnx.ModelProto],
@@ -2686,6 +2985,106 @@ def apply_quarot_gptq_cpp(
             percdamp,
             proc_block_size,
             epsilon,
+        )
+    )
+
+
+def apply_gptvq_cpp(
+    model: Union[str, onnx.ModelProto],
+    calibration_data: Optional[Sequence[Tensors]] = None,
+    num_samples: int = 8,
+    seed: int = 0,
+    vector_dim: int = 2,
+    num_centroids: int = 256,
+    num_iterations: int = 10,
+    percdamp: float = 0.01,
+    providers: Optional[Sequence[backend.Provider]] = None,
+    skip_names: Optional[Iterable[str]] = None,
+) -> onnx.ModelProto:
+    """
+    C++-backed port of :func:`onnxsim.quantize_weight_only_gptvq`: GPTVQ
+    (Van Baalen et al., 2024) -- a genuine combination of
+    :func:`onnxsim.apply_gptq_cpp`'s own sequential, Hessian-compensated
+    correction with a k-means-fit vector codebook (like
+    :mod:`onnxsim.aqlm`'s own single shared codebook): small groups of
+    consecutive input-channel columns of every matched MatMul/vanilla-Gemm
+    layer's constant 2-D FLOAT32 weight are jointly quantized against the
+    codebook, then each group's resulting per-column residual is
+    propagated into every not-yet-quantized column exactly like GPTQ's own
+    per-column correction (see ``onnxsim/gptvq.py``'s own module docstring
+    for the full technique).
+
+    Same real calibration machinery as :func:`onnxsim.apply_gptq_cpp` --
+    a live :class:`onnxsim.onnx_simplifier.PyModelExecutor`-backed
+    :func:`onnxsim.onnx_simplifier._get_model_executor` executor actually
+    runs ``calibration_data`` through ``model`` in C++ (see ``ApplyGptvq``
+    in ``gptvq_entry.h`` for the full scope, including its own permanent
+    RNG divergence from the Python reference for the k-means codebook fit
+    -- not aliased to :func:`onnxsim.quantize_weight_only_gptvq` for the
+    same reason :func:`onnxsim.apply_quarot_cpp` is not aliased to
+    :func:`onnxsim.apply_quarot`).
+
+    Rewires only the matched node's weight input (a
+    ``Gather``+``Reshape``[+``Transpose``] chain); the node itself,
+    including any bias, is left otherwise unchanged.
+
+    :param model: the original (unquantized) onnx ModelProto or file path
+    :param calibration_data: representative input batches to compute each
+            layer's Hessian from -- see
+            :func:`onnxsim.generate_random_calibration_data` (the default
+            when omitted)
+    :param num_samples: random batches to generate when
+            ``calibration_data`` is omitted
+    :param seed: seed for the per-layer k-means codebook initialization
+            (independent of, and not comparable to,
+            :func:`onnxsim.quantize_weight_only_gptvq`'s own ``seed`` --
+            see ``gptvq_entry.h``) and for the random calibration data
+            (ignored for the latter if ``calibration_data`` is supplied)
+    :param vector_dim: elements per group (each ``vector_dim``-element
+            chunk of consecutive input-channel columns is jointly
+            quantized to a single codebook entry)
+    :param num_centroids: entries in the layer's own fitted codebook
+    :param num_iterations: Lloyd's-algorithm iterations fitting the
+            codebook
+    :param percdamp: Hessian damping factor, matching
+            :func:`onnxsim.apply_gptq_cpp`'s own parameter and default
+    :param providers: onnxruntime execution providers to run ``model`` on
+            when capturing calibration activations
+    :param skip_names: weight initializer names to leave unquantized even
+            if otherwise eligible
+    :returns: ``model`` with every matched, eligible layer's weight
+            replaced by a codebook lookup reconstructing it in the
+            weight's own units; a layer with a non-constant, non-2-D
+            weight, a name in ``skip_names``, a reduction dimension not
+            divisible by ``vector_dim``, or no usable calibration
+            activation, is left completely untouched.
+    """
+    if isinstance(model, str):
+        model = onnx.load(model, load_external_data=False)
+    if calibration_data is None:
+        calibration_data = generate_random_calibration_data(
+            model, num_samples=num_samples, seed=seed
+        )
+    # Same {input_name: TensorProto}-per-batch crossing convention as
+    # apply_gptq_cpp -- see that function's own comment.
+    calibration_data_pb = [
+        {
+            name: onnx.numpy_helper.from_array(np.asarray(arr), name)
+            for name, arr in batch.items()
+        }
+        for batch in calibration_data
+    ]
+    return onnx.load_from_string(
+        C.apply_gptvq(
+            _get_model_executor(providers),
+            model.SerializeToString(),
+            calibration_data_pb,
+            seed,
+            vector_dim,
+            num_centroids,
+            num_iterations,
+            percdamp,
+            list(skip_names) if skip_names is not None else [],
         )
     )
 
